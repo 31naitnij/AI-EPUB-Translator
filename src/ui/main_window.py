@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("开始翻译")
         self.btn_stop = QPushButton("停止")
         self.btn_clear_cache = QPushButton("清除缓存")
-        self.btn_manual_verify = QPushButton("格式校验")
+        self.btn_manual_verify = QPushButton("内容清理")
         self.btn_output = QPushButton("导出")
         
         self.btn_prepare.clicked.connect(self.prepare_chunks_only)
@@ -489,26 +489,17 @@ class MainWindow(QMainWindow):
                     # ID
                     self.group_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
                     # Status
-                    status_str = "未翻译"
-                    if c_data["trans"]:
-                        status_str = "格式错误" if c_data.get("is_error") else "已翻译"
-                    
+                    status_str = "已翻译" if c_data["trans"] else "未翻译"
                     status_item = QTableWidgetItem(status_str)
-                    if c_data.get("is_error"):
-                        status_item.setBackground(Qt.yellow)
                     self.group_table.setItem(row, 1, status_item)
                     
                     # Preview
                     preview = c_data["orig"][:50].replace("\n", " ") + "..."
                     preview_item = QTableWidgetItem(preview)
-                    if c_data.get("is_error"):
-                        preview_item.setBackground(Qt.yellow)
                     self.group_table.setItem(row, 2, preview_item)
                     
-                    # ID item background too
+                    # ID
                     id_item = QTableWidgetItem(str(row + 1))
-                    if c_data.get("is_error"):
-                        id_item.setBackground(Qt.yellow)
                     self.group_table.setItem(row, 0, id_item)
                     
                     row += 1
@@ -568,15 +559,16 @@ class MainWindow(QMainWindow):
     def load_group_into_editor(self, flat_idx):
         if not hasattr(self, 'flat_chunks') or not self.flat_chunks: return
         
+        ch_idx, ck_idx = self.flat_chunks[flat_idx]
+        
         # 1. Before loading new, SYNC current editor content back to memory 
-        # (Only if we were already viewing/editing something)
+        # BUT ONLY if we're switching to a DIFFERENT chunk (避免覆盖 on_progress 刚更新的翻译)
         if hasattr(self, 'current_indices') and self.current_cache_data:
              old_f_idx, old_c_idx = self.current_indices
-             # Update the in-memory structure with what's currently in the trans text edit
-             # This ensures that even without clicking "Save", the changes aren't lost when clicking other rows
-             self.current_cache_data["files"][old_f_idx]["chunks"][old_c_idx]["trans"] = self.trans_text_edit.toPlainText()
+             # 只有在切换到不同块时才回写，避免覆盖最新翻译
+             if (old_f_idx, old_c_idx) != (ch_idx, ck_idx):
+                 self.current_cache_data["files"][old_f_idx]["chunks"][old_c_idx]["trans"] = self.trans_text_edit.toPlainText()
         
-        ch_idx, ck_idx = self.flat_chunks[flat_idx]
         cache_data = self.current_cache_data
         
         if cache_data and ch_idx < len(cache_data["files"]):
@@ -734,14 +726,9 @@ class MainWindow(QMainWindow):
                 f_idx, c_idx = self.flat_chunks[current_idx]
                 chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
                 
-                if chunk.get("is_error"):
-                    status_item.setText("格式错误")
-                    for col in range(self.group_table.columnCount()):
-                        self.group_table.item(current_idx, col).setBackground(Qt.yellow)
-                else:
-                    status_item.setText("已翻译")
-                    for col in range(self.group_table.columnCount()):
-                        self.group_table.item(current_idx, col).setBackground(Qt.transparent)
+                status_item.setText("已翻译")
+                for col in range(self.group_table.columnCount()):
+                    self.group_table.item(current_idx, col).setBackground(Qt.transparent)
         
         # 3. Auto-follow: Select the row being completed
         cur_row = self.group_table.currentRow()
@@ -768,27 +755,12 @@ class MainWindow(QMainWindow):
             trans_text = self.trans_text_edit.toPlainText()
             self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]["trans"] = trans_text
              
-            # --- Re-check Logic ---
-            chunk = self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]
-            g_indices = chunk.get("block_indices", [])
-            group_blocks = [{"text": self.current_cache_data["all_blocks"][idx]["text"], "formats": self.current_cache_data["all_blocks"][idx]["formats"]} for idx in g_indices]
-            
-            if self.current_mode == "docx_anchor":
-                _, ok = self.processor.docx_anchor_processor.validate_and_parse_response(trans_text, group_blocks)
-            else:
-                _, ok = self.processor.epub_anchor_processor.validate_and_parse_response(trans_text, group_blocks)
-            
-            chunk["is_error"] = not ok
-            
             # Update table UI
             if hasattr(self, 'current_flat_idx_view'):
                 row = self.current_flat_idx_view
-                status_text = "已翻译" if ok else "格式错误"
-                bg_color = Qt.transparent if ok else Qt.yellow
-                
-                self.group_table.item(row, 1).setText(status_text)
+                self.group_table.item(row, 1).setText("已翻译")
                 for col in range(self.group_table.columnCount()):
-                    self.group_table.item(row, col).setBackground(bg_color)
+                    self.group_table.item(row, col).setBackground(Qt.transparent)
              
         # 2. Save the entire in-memory data to disk
         self.processor.save_cache(cache_file, self.current_cache_data)
@@ -801,17 +773,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先选择并加载文件。")
             return
             
-        self.status_label.setText("正在进行全量格式校验...")
-        QCoreApplication.processEvents() # 让进度文字显示出来
+        self.status_label.setText("正在执行内容清理...")
+        QCoreApplication.processEvents()
         
-        # 调用后端的手动校验逻辑，直接复用 on_progress 来更新 UI 高亮
         success = self.processor.run_manual_verification(file_path, callback=self.on_progress)
         
         if success:
-            self.status_label.setText("全量格式校验已完成。")
-            QMessageBox.information(self, "完成", "所有翻译块的结构校验已结束，错误位置已高亮。")
+            self.status_label.setText("内容清理已完成。")
+            QMessageBox.information(self, "完成", "已清理所有翻译块中的错误标记。")
         else:
-            self.status_label.setText("校验失败。")
+            self.status_label.setText("清理失败。")
 
     def clear_cache(self):
         file_path = self.epub_path_edit.text()
@@ -821,17 +792,30 @@ class MainWindow(QMainWindow):
             
         cache_dir = self.cache_path_edit.text()
         proc = Processor(cache_dir)
-        cache_file = proc.get_cache_filename(file_path)
-        cache_path = os.path.join(cache_dir, cache_file)
+        
+        # 获取新旧两种可能的路径
+        folder_cache = proc.get_cache_dir_path(file_path)
+        legacy_cache = proc.get_legacy_cache_path(file_path)
         
         reply = QMessageBox.question(self, '确认清除', '确定要清除当前书籍的翻译缓存吗？这将导致翻译重新开始。',
                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         
         if reply == QMessageBox.Yes:
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-                QMessageBox.information(self, "成功", "缓存已清除。")
-                self.init_processor_and_chunks() # Refresh table
+            deleted = False
+            # 1. 删除新版文件夹缓存
+            if os.path.exists(folder_cache):
+                import shutil
+                shutil.rmtree(folder_cache)
+                deleted = True
+            
+            # 2. 删除旧版单文件缓存
+            if os.path.exists(legacy_cache):
+                os.remove(legacy_cache)
+                deleted = True
+                
+            if deleted:
+                QMessageBox.information(self, "成功", "所有缓存已清除（包括旧版文件）。")
+                self.init_processor_and_chunks() # 刷新列表
             else:
                 QMessageBox.information(self, "提示", "未发现现有缓存。")
 

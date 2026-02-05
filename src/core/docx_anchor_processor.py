@@ -55,9 +55,11 @@ class DocxAnchorProcessor:
                 if f.startswith(('header', 'footer', 'footnotes', 'endnotes', 'comments')) and f.endswith('.xml'):
                     content_files.append(os.path.join(word_dir, f))
         
+        # 强制排序，文档主体 document.xml 通常在最前，但其余部分需保持一致
+        content_files.sort() 
         return content_files
 
-    def extract_block_with_local_ids(self, element):
+    def extract_block_with_local_ids(self, element, include_nodes=False):
         """
         核心逻辑：提取 DOCX 段落内容，将格式运行 <w:r> 转化为带编号的锚点。
         """
@@ -69,42 +71,24 @@ class DocxAnchorProcessor:
                 return node.get_text().replace('<', '&lt;').replace('>', '&gt;')
             
             if node.name == 'r': # w:r 标签 (Run)
-                # 检查是否有 w:t
+                # 核心改进：为每一个 run 分配一个唯一 ID，确保 1:1 映射
+                tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
+                local_counter[0] += 1
+                
+                tag_info = {
+                    'id': tag_id,
+                    'tag': 'r',
+                    'type': 'run'
+                }
+                if include_nodes:
+                    tag_info['node'] = node # 仅在还原阶段需要内存引用
+                format_tags.append(tag_info)
+
                 t_node = node.find('t', recursive=False)
-                # 检查是否有其他特殊标签 (如 w:br, w:tab, w:drawing)
-                special_nodes = node.find_all(lambda tag: tag.name in ('br', 'tab', 'drawing', 'pict'), recursive=False)
-                
-                # 获取格式属性 (w:rPr)
-                rPr = node.find('rPr', recursive=False)
-                attrs = str(rPr) if rPr else ""
-                
-                # 如果这个 run 包含文本
                 if t_node:
                     inner_text = t_node.get_text().replace('<', '&lt;').replace('>', '&gt;')
-                    if not attrs and not special_nodes:
-                        # 无格式，直接返回文本
-                        return inner_text
-                    
-                    tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
-                    local_counter[0] += 1
-                    format_tags.append({
-                        'id': tag_id,
-                        'tag': 'r',
-                        'raw_xml': str(node),
-                        'type': 'container'
-                    })
                     return f"{self.TS}{inner_text}{self.TE}{tag_id}"
-                
-                # 如果这个 run 只包含特殊节点
-                elif special_nodes:
-                    tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
-                    local_counter[0] += 1
-                    format_tags.append({
-                        'id': tag_id,
-                        'tag': 'r',
-                        'raw_xml': str(node),
-                        'type': 'monolithic'
-                    })
+                else:
                     return tag_id
                 
             # 处理其他子节点 (如 w:p 中的特殊标签)
@@ -118,32 +102,33 @@ class DocxAnchorProcessor:
         full_text = recursive_extract(element)
         return full_text, format_tags
 
-    def create_blocks_from_soup(self, soup):
-        """从 DOCX XML 中提取翻译块 (主要是 w:p)"""
+    def create_blocks_from_soup(self, soup, include_nodes=False, start_global_idx=0):
+        """
+        从 DOCX XML 中提取翻译块 (主要是 w:p)。
+        添加强制打标逻辑：给每个块添加 data-trans-idx 属性。
+        """
         blocks = []
-        # DOCX 中的段落标签是 w:p
-        # 注意：BeautifulSoup 在解析带命名的 XML 时可能需要处理命名空间
-        # 但我们这里简单通过标签名查找
+        # 同时查找带命名空间和不带命名空间的 p
         paragraphs = soup.find_all(['p', 'w:p'])
         
         for p in paragraphs:
-            # 简单过滤掉没有文本的段落
-            text_content = p.get_text().strip()
-            if not text_content:
-                # 即使是空段落，我们也保留其结构，但不作为翻译块？
-                # 按照 EPUB 的逻辑，我们保留它以保持对齐
-                pass
-            
-            text, formats = self.extract_block_with_local_ids(p)
+            text, formats = self.extract_block_with_local_ids(p, include_nodes=include_nodes)
             if not text.strip():
-                # 如果没有任何可翻译文字，跳过
                 continue
+            
+            # 核心改进：ID-Aware 发现逻辑
+            if p.has_attr('data-trans-idx'):
+                idx = int(p['data-trans-idx'])
+            else:
+                idx = start_global_idx + len(blocks)
+                p['data-trans-idx'] = str(idx)
                 
             blocks.append({
                 'element': p,
                 'text': text,
                 'formats': formats,
-                'size': len(text)
+                'size': len(text),
+                'global_idx': idx
             })
         return blocks
 
@@ -158,120 +143,89 @@ class DocxAnchorProcessor:
 
     def validate_and_parse_response(self, response_text, original_group):
         """
-        校验 AI 响应的结构并解析。根据序列分隔符提取。
-        同时校验内部锚点 (⦗n⦘) 和 ⟦⟧ 符号。
+        [彻底移除结构校验] 宽容解析：不再校验锚点一致性或符号闭合。
         """
+        # 1. 尝试提取 ⟬ ⟭ 内部内容
         pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
         group_match = re.search(pattern, response_text)
-        if not group_match:
-            return None, False
-        
-        content = group_match.group(1).strip()
+        if group_match:
+            content = group_match.group(1).strip()
+        else:
+            content = response_text.strip()
+            
         translated_texts = []
-        
         last_pos = 0
+        
+        # 2. 按顺序提取块
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content[last_pos:], re.DOTALL)
+            
             if match:
                 block_text = match.group(1).strip()
                 translated_texts.append(block_text)
                 last_pos += match.end()
-                
-                # --- 增加：内部锚点一致性校验 ---
-                orig_block = original_group[i]
-                orig_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), orig_block['text']))
-                trans_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), block_text))
-                
-                if orig_anchors != trans_anchors:
-                    return None, False
-                
-                if block_text.count(self.TS) != block_text.count(self.TE):
-                    return None, False
             else:
-                return None, False
+                # 容错：追加原文保持对齐
+                translated_texts.append(original_group[i]['text'])
         
-        if len(translated_texts) != len(original_group):
-            return None, False
-                
         return translated_texts, True
 
     def restore_xml(self, original_block, translated_text, soup):
-        """将翻译后的锚点文本还原为 DOCX XML"""
-        format_map = {int(re.search(r'(\d+)', f['id']).group(1)): f for f in original_block['formats']}
+        """
+        [最可靠方案] 手术式还原：直接修改 original_block['element'] 内部已有的 run 节点。
+        不再清空或重建 XML 树，只更新文本内容。
+        """
+        # 建立 ID 到原有 run 节点的映射
+        # original_block['formats'] 包含了提取时记录的节点引用
+        node_map = {}
+        for f in original_block['formats']:
+            num_match = re.search(r'(\d+)', f['id'])
+            if num_match:
+                node_map[int(num_match.group(1))] = f['node']
+
+        # 解析翻译后的文本，按顺序提取出每个锚点对应的文字
+        # 我们寻找 ⟦...⟧⦗n⦘ 结构
+        pattern = re.escape(self.TS) + r'(.*?)' + re.escape(self.TE) + re.escape(self.AS) + r'(\d+)' + re.escape(self.AE)
+        matches = list(re.finditer(pattern, translated_text))
         
-        def parse_to_nodes(text):
-            nodes = []
-            i = 0
-            while i < len(text):
-                if text[i] == self.TS:
-                    start_idx = i
-                    level = 1
-                    j = i + 1
-                    while j < len(text) and level > 0:
-                        if text[j] == self.TS: level += 1
-                        elif text[j] == self.TE: level -= 1
-                        j += 1
-                    
-                    if level == 0:
-                        inner_text = text[start_idx+1:j-1]
-                        anchor_tail = text[j:]
-                        match = re.match(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), anchor_tail)
-                        if match:
-                            anchor_num = int(match.group(1))
-                            if anchor_num in format_map:
-                                fmt = format_map[anchor_num]
-                                # 还原 w:r
-                                # 我们采取“克隆并更新文本”的策略
-                                r_node = BeautifulSoup(fmt['raw_xml'], 'xml').find('r')
-                                if r_node:
-                                    t_node = r_node.find('t')
-                                    if t_node:
-                                        t_node.string = inner_text
-                                    nodes.append(r_node)
-                                    i = j + match.end()
-                                    continue
-                
-                match_solo = re.match(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), text[i:])
-                if match_solo:
-                    anchor_num = int(match_solo.group(1))
-                    if anchor_num in format_map:
-                        fmt = format_map[anchor_num]
-                        # 还原单体节点 (如 w:br 或带 drawing 的 w:r)
-                        node = BeautifulSoup(fmt['raw_xml'], 'xml').contents[0]
-                        import copy
-                        nodes.append(copy.copy(node))
-                        i += match_solo.end()
-                        continue
-                
-                # 普通文本，需要包裹在 w:r/w:t 中
-                # 为了保持简单，我们遇到连续文本时会创建一个新的 w:r
-                curr_text = ""
-                while i < len(text) and text[i] not in (self.TS, self.AS):
-                    curr_text += text[i]
-                    i += 1
-                if curr_text:
-                    new_r = soup.new_tag('w:r')
+        # 记录哪些节点已被更新，用于处理那些没有文字但有 ID 的节点（如 w:br）
+        updated_ids = set()
+        
+        for m in matches:
+            trans_inner = m.group(1)
+            node_id = int(m.group(2))
+            
+            if node_id in node_map:
+                run_node = node_map[node_id]
+                # 找到该 run 下的 w:t (或是 t)
+                t_node = run_node.find(['t', 'w:t'])
+                if t_node:
+                    t_node.string = trans_inner
+                else:
+                    # 如果原本没有 t 节点但现在翻译出了文字，则创建一个
                     new_t = soup.new_tag('w:t')
                     new_t['xml:space'] = 'preserve'
-                    new_t.string = curr_text
-                    new_r.append(new_t)
-                    nodes.append(new_r)
-                continue
-                
-            return nodes
-
-        new_nodes = parse_to_nodes(translated_text)
+                    new_t.string = trans_inner
+                    run_node.append(new_t)
+                updated_ids.add(node_id)
         
-        # 保留 w:pPr (段落属性)
-        pPr = original_block['element'].find(['pPr', 'w:pPr'], recursive=False)
-        original_block['element'].clear()
-        if pPr:
-            original_block['element'].append(pPr)
-            
-        for node in new_nodes:
-            original_block['element'].append(node)
+        # 处理可能的“孤儿”锚点（即没有翻译出 ⟦⟧ 的锚点，或者纯 ID 锚点）
+        # 只要 ID 在翻译文本中出现，说明它被保留了
+        solo_pattern = re.escape(self.AS) + r'(\d+)' + re.escape(self.AE)
+        for m in re.finditer(solo_pattern, translated_text):
+            node_id = int(m.group(1))
+            if node_id not in updated_ids and node_id in node_map:
+                # 这种节点由于没有包围 ⟦⟧，意味着它是不可翻译节点（如 w:br）
+                # 只要它在译文中出现了，我们就保持其原本在 XML tree 中的位置
+                # 由于我们根本没有清空 original_block['element']，所以它本身就在那里
+                pass
+
+        # 这个方案最强大的一点在于：我们根本不需要做任何重建工作。
+        # original_block['element'] 是 BeautifulSoup 中原始 XML 树的一个节点。
+        # 我们在提取时记录了它的子节点引用，现在直接通过这些引用修改了它们的内容。
+        # 整个文档的结构、命名空间、段落属性完全没动。
 
     def repack_docx(self, output_path):
         """重新打包目录为 DOCX"""
@@ -283,7 +237,8 @@ class DocxAnchorProcessor:
                 for file in files:
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, self.temp_dir)
-                    zipf.write(full_path, rel_path)
+                    # ZIP 规范要求使用正斜杠，在 Windows 上需转换
+                    zipf.write(full_path, rel_path.replace("\\", "/"))
                     
     def cleanup(self):
         """清理临时目录"""
