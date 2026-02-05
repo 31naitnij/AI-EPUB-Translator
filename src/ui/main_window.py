@@ -8,6 +8,7 @@ from PySide6.QtGui import QFont, QIcon
 import os
 import sys
 import shutil
+import time
 
 from src.core.config_manager import ConfigManager
 from src.core.translator import Translator
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.load_settings_history()
+        self._last_ui_update = 0
 
     def init_ui(self):
         central_widget = QWidget()
@@ -225,12 +227,8 @@ class MainWindow(QMainWindow):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         
         ctrl_row = QHBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.btn_prepare = QPushButton("分块并分组")
-        self.btn_translate_sel = QPushButton("翻译选中组")
-        self.btn_start = QPushButton("开始翻译")
-        self.btn_stop = QPushButton("停止")
         self.btn_clear_cache = QPushButton("清除缓存")
+        self.btn_manual_verify = QPushButton("格式校验")
         self.btn_output = QPushButton("导出")
         
         self.btn_prepare.clicked.connect(self.prepare_chunks_only)
@@ -238,6 +236,7 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_translation)
         self.btn_stop.clicked.connect(self.stop_translation)
         self.btn_clear_cache.clicked.connect(self.clear_cache)
+        self.btn_manual_verify.clicked.connect(self.on_manual_verify)
         self.btn_output.clicked.connect(self.export_epub)
         
         self.btn_translate_sel.setEnabled(False)
@@ -249,6 +248,7 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(self.btn_translate_sel)
         ctrl_row.addWidget(self.btn_start)
         ctrl_row.addWidget(self.btn_stop)
+        ctrl_row.addWidget(self.btn_manual_verify)
         ctrl_row.addWidget(self.btn_clear_cache)
         ctrl_row.addWidget(self.btn_output)
         bottom_layout.addLayout(ctrl_row)
@@ -583,45 +583,51 @@ class MainWindow(QMainWindow):
             self.status_label.setText("正在停止...")
 
     def on_progress(self, current_idx, total, orig, trans, is_finished):
-        # 1. Update In-Memory Cache (Critical for Review)
+        # 1. Update In-Memory Cache (Critical for Review) - ALWAYS update cache
         if hasattr(self, 'flat_chunks') and hasattr(self, 'current_cache_data'):
             f_idx, c_idx = self.flat_chunks[current_idx]
             if self.current_cache_data:
                 self.current_cache_data["files"][f_idx]["chunks"][c_idx]["trans"] = trans
         
-        # 2. Update Table Status
+        now = time.time()
+        # 2. UI 更新限制：
+        # - 流式渲染（trans_text_edit）采用 100ms 降频以保证流畅
+        # - 列表刷新（table）仅在 is_finished=True 时进行，消除卡顿
+        
+        # 处理编辑器实时显示 (流式)
+        if not is_finished:
+            if now - self._last_ui_update > 0.1: # 100ms 节流
+                self.status_label.setText(f"正在翻译进度: {current_idx+1}/{total} (流式传输中...)")
+                self.orig_text_edit.setPlainText(orig)
+                self.trans_text_edit.setPlainText(trans)
+                self._last_ui_update = now
+            return
+
+        # 当一个 chunk 完成时，更新列表状态
         if current_idx < self.group_table.rowCount():
             status_item = self.group_table.item(current_idx, 1)
             if status_item:
-                if is_finished:
-                    f_idx, c_idx = self.flat_chunks[current_idx]
-                    chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
-                    if chunk.get("is_error"):
-                        status_item.setText("格式错误")
-                        for col in range(self.group_table.columnCount()):
-                            self.group_table.item(current_idx, col).setBackground(Qt.yellow)
-                    else:
-                        status_item.setText("已翻译")
-                        for col in range(self.group_table.columnCount()):
-                            self.group_table.item(current_idx, col).setBackground(Qt.transparent)
+                f_idx, c_idx = self.flat_chunks[current_idx]
+                chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
+                
+                if chunk.get("is_error"):
+                    status_item.setText("格式错误")
+                    for col in range(self.group_table.columnCount()):
+                        self.group_table.item(current_idx, col).setBackground(Qt.yellow)
                 else:
-                    status_item.setText("翻译中...")
+                    status_item.setText("已翻译")
+                    for col in range(self.group_table.columnCount()):
+                        self.group_table.item(current_idx, col).setBackground(Qt.transparent)
         
-        # 3. Auto-follow: Select the row being translated
-        # Check if we need to switch view
+        # 3. Auto-follow: Select the row being completed
         cur_row = self.group_table.currentRow()
         if cur_row != current_idx:
             self.group_table.selectRow(current_idx)
-            # The signal will handle loading text into editor and updating block table
         else:
-            # If already selected, just update the text manually because signal might not fire
             self.orig_text_edit.setPlainText(orig)
             self.trans_text_edit.setPlainText(trans)
         
-        if is_finished:
-            self.status_label.setText(f"总进度: {current_idx+1}/{total} (本块已完成)")
-        else:
-            self.status_label.setText(f"总进度: {current_idx+1}/{total} (正在翻译...)")
+        self.status_label.setText(f"总进度: {current_idx+1}/{total} (当前块处理完成)")
 
     def save_manual_edit(self):
         if not self.processor or not self.current_cache_data:
@@ -662,6 +668,25 @@ class MainWindow(QMainWindow):
         # 2. Save the entire in-memory data to disk
         self.processor.save_cache(cache_file, self.current_cache_data)
         self.status_label.setText(f"所有手动修改已保存并重新校验。")
+
+    def on_manual_verify(self):
+        if not self.processor: return
+        file_path = self.epub_path_edit.text()
+        if not file_path:
+            QMessageBox.warning(self, "警告", "请先选择并加载文件。")
+            return
+            
+        self.status_label.setText("正在进行全量格式校验...")
+        QCoreApplication.processEvents() # 让进度文字显示出来
+        
+        # 调用后端的手动校验逻辑，直接复用 on_progress 来更新 UI 高亮
+        success = self.processor.run_manual_verification(file_path, callback=self.on_progress)
+        
+        if success:
+            self.status_label.setText("全量格式校验已完成。")
+            QMessageBox.information(self, "完成", "所有翻译块的结构校验已结束，错误位置已高亮。")
+        else:
+            self.status_label.setText("校验失败。")
 
     def clear_cache(self):
         file_path = self.epub_path_edit.text()

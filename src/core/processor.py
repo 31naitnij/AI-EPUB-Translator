@@ -290,24 +290,8 @@ class Processor:
                 if callback:
                     callback(i, len(flat_list), chunk["orig"], full_translation, False)
             
-            # 校（锚点模式）
-            g_indices = chunk.get("block_indices", [])
-            group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in g_indices]
-            
-            # 根据 source_type 选择校验器
-            if cached_data.get("source_type") == "docx_anchor":
-                _, ok = self.docx_anchor_processor.validate_and_parse_response(full_translation, group_blocks)
-            else:
-                _, ok = self.epub_anchor_processor.validate_and_parse_response(full_translation, group_blocks)
-                
-            if not ok:
-                if not full_translation.startswith("【结构校验失败，请手动检查】"):
-                    full_translation = f"【结构校验失败，请手动检查】\n{full_translation}"
-                chunk["is_error"] = True
-            else:
-                chunk["is_error"] = False
-
             chunk["trans"] = full_translation
+            chunk["is_error"] = False # 初始设为 False，后期校验会更新
             
             if callback:
                 callback(i, len(flat_list), chunk["orig"], full_translation, True)
@@ -318,8 +302,47 @@ class Processor:
 
         if target_indices is None:
             cached_data["finished"] = True
-            self.save_cache(cache_file, cached_data)
+        self.save_cache(cache_file, cached_data)
+        return True
+
+    def run_manual_verification(self, file_path, callback=None):
+        """手动运行全量结构校验"""
+        cache_file = self.get_cache_filename(file_path)
+        cached_data = self.load_cache(cache_file)
+        if not cached_data:
+            return False
+
+        flat_list = []
+        for f_i, f_data in enumerate(cached_data["files"]):
+            for c_i, c_data in enumerate(f_data["chunks"]):
+                flat_list.append((f_i, c_i))
+
+        for i, (f_idx, c_idx) in enumerate(flat_list):
+            chunk = cached_data["files"][f_idx]["chunks"][c_idx]
+            if not chunk["trans"] or chunk["trans"].startswith("【跳过】"):
+                continue
+
+            g_indices = chunk.get("block_indices", [])
+            group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in g_indices]
+            
+            if cached_data.get("source_type") == "docx_anchor":
+                _, ok = self.docx_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
+            else:
+                _, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
+                
+            if not ok:
+                if not chunk["trans"].startswith("【结构校验失败，请手动检查】"):
+                    chunk["trans"] = f"【结构校验失败，请手动检查】\n{chunk['trans']}"
+                chunk["is_error"] = True
+            else:
+                chunk["is_error"] = False
+            
+            if callback:
+                # 再次触发回调，让 UI 更新状态和高亮
+                callback(i, len(flat_list), chunk["orig"], chunk["trans"], True)
         
+        self.save_cache(cache_file, cached_data)
+        return True
         self.status = "idle"
         return True
 

@@ -169,13 +169,15 @@ class DocxAnchorProcessor:
         content = group_match.group(1).strip()
         translated_texts = []
         
+        last_pos = 0
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
-            match = re.search(block_pattern, content, re.DOTALL)
+            match = re.search(block_pattern, content[last_pos:], re.DOTALL)
             if match:
                 block_text = match.group(1).strip()
                 translated_texts.append(block_text)
+                last_pos += match.end()
                 
                 # --- 增加：内部锚点一致性校验 ---
                 orig_block = original_group[i]
