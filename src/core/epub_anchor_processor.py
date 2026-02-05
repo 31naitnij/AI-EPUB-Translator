@@ -115,38 +115,104 @@ class EPubAnchorProcessor:
         return full_text, format_tags
 
     def create_blocks_from_soup(self, soup):
-        """从 BeautifulSoup 对象中识别翻译块"""
+        """
+        从 BeautifulSoup 对象中识别翻译块。
+        采用视觉语义聚合策略：
+        1. 保持小片段（如标题+段落、脚注编号+正文）的聚合，匹配浏览器视觉分段。
+        2. 对大型容器进行递归拆分，确保单次翻译不超负荷。
+        """
         blocks = []
-        # 极大扩展可翻译标签
-        translatable_tags = [
+        # 定义核心语义块标签
+        semantic_tags = {
             'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
             'li', 'td', 'th', 'caption', 'figcaption', 
-            'blockquote', 'dt', 'dd', 'cite', 'footer', 'aside',
-            'div', 'section', 'article' # 只有其直接包含文本时才处理
-        ]
+            'blockquote', 'dt', 'dd', 'cite', 'footer', 'aside'
+        }
+        # 定义容器标签
+        container_tags = {'div', 'section', 'article', 'body'}
         
-        # 寻找所有可能的元素
-        all_elements = soup.find_all(translatable_tags)
-        
-        for element in all_elements:
-            # 策略：如果一个元素包含其他也在 translatable_tags 里的子元素，
-            # 只有当它本身有“直接”的非空白文本时，才处理它。
-            has_translatable_child = any(child.name in translatable_tags for child in element.find_all(translatable_tags, recursive=False))
+        # 聚合阈值：如果一个容器的总字符数小于此值，则将其视为一个整体块
+        # 这能保证“1. [段落]”或“标题 [段落]”在视觉上较短时被归为一块
+        COHESIVE_THRESHOLD = 800
+
+        def get_text_size(node):
+            if isinstance(node, str):
+                return len(node.strip())
+            return len(node.get_text().strip())
+
+        def process_node(node):
+            if not node or isinstance(node, str):
+                return
             
-            if has_translatable_child:
-                # 检查是否有直接文本
-                direct_text = "".join([t for t in element.find_all(string=True, recursive=False) if t.strip()])
-                if not direct_text:
-                    continue
+            # 1. 如果是语义标签
+            if node.name in semantic_tags:
+                size = get_text_size(node)
+                if size > 0:
+                    text, formats = self.extract_block_with_local_ids(node)
+                    blocks.append({
+                        'element': node,
+                        'text': text,
+                        'formats': formats,
+                        'size': size
+                    })
+                return
+
+            # 2. 如果是容器标签
+            if node.name in container_tags:
+                total_size = get_text_size(node)
+                if total_size == 0:
+                    return
+
+                # 检查该容器是否足够小，可以作为一个聚合块
+                # 或者它是否不包含任何进一步的子容器/语义标签
+                has_child_structures = any(
+                    child.name in semantic_tags or child.name in container_tags
+                    for child in node.find_all(True, recursive=False)
+                )
+
+                if total_size < COHESIVE_THRESHOLD or not has_child_structures:
+                    # 作为一个整体提取
+                    text, formats = self.extract_block_with_local_ids(node)
+                    if text.strip():
+                        blocks.append({
+                            'element': node,
+                            'text': text,
+                            'formats': formats,
+                            'size': total_size
+                        })
+                else:
+                    # 容器太大，深入递归
+                    for child in node.children:
+                        if isinstance(child, str):
+                            if child.strip():
+                                blocks.append({
+                                    'element': child,
+                                    'text': child.strip().replace('<', '&lt;').replace('>', '&gt;'),
+                                    'formats': [],
+                                    'size': len(child.strip())
+                                })
+                        else:
+                            process_node(child)
+            else:
+                # 处理未定义的其他标签（如 span, b, i 等出现在顶层的情况）
+                if get_text_size(node) > 0:
+                    # 我们不确定它是否是块级，但如果是顶层子节点，我们需要处理它
+                    text, formats = self.extract_block_with_local_ids(node)
+                    blocks.append({
+                        'element': node,
+                        'text': text,
+                        'formats': formats,
+                        'size': get_text_size(node)
+                    })
+
+        # 从 body 开始探测
+        body = soup.find('body')
+        if body:
+            for child in body.children:
+                process_node(child)
+        else:
+            process_node(soup)
             
-            # 不再跳过 text_content 为空的块 (如 <p>&nbsp;</p>)，以保持对齐
-            text, formats = self.extract_block_with_local_ids(element)
-            blocks.append({
-                'element': element,
-                'text': text,
-                'formats': formats,
-                'size': len(text)
-            })
         return blocks
 
     def format_for_ai(self, group_blocks):

@@ -52,6 +52,8 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.load_settings_history()
         self._last_ui_update = 0
+        self.current_task_indices = None
+        self.current_mode = ""
 
     def init_ui(self):
         central_widget = QWidget()
@@ -539,7 +541,7 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
         self.worker.start()
-        self.status_label.setText(f"开始翻译选中的 {len(rows)} 个块...")
+        self.status_label.setText(f"选定块翻译执行中... (共 {len(rows)} 块)")
 
     def start_translation(self):
         if not self.init_processor_and_chunks(): return
@@ -585,7 +587,8 @@ class MainWindow(QMainWindow):
     def stop_translation(self):
         if self.processor:
             self.processor.status = "stopped"
-            self.status_label.setText("正在停止...")
+            # 强化停止时的提示语，告知用户正在优雅退出
+            self.status_label.setText("正在等待当前段落完成并保存后停止...")
 
     def on_progress(self, current_idx, total, orig, trans, is_finished):
         # 1. Update In-Memory Cache (Critical for Review) - ALWAYS update cache
@@ -594,15 +597,26 @@ class MainWindow(QMainWindow):
             if self.current_cache_data:
                 self.current_cache_data["files"][f_idx]["chunks"][c_idx]["trans"] = trans
         
+        # 2. 进度条与状态栏反馈
+        if hasattr(self, 'current_task_indices') and self.current_task_indices:
+            # 如果是局部翻译，进度基于选中块
+            try:
+                task_pos = self.current_task_indices.index(current_idx) + (1 if is_finished else 0.5)
+                self.progress_bar.setValue(int(task_pos))
+                task_status = f"翻译选定块: {self.current_task_indices.index(current_idx)+1}/{len(self.current_task_indices)}"
+            except ValueError:
+                task_status = f"进度: {current_idx+1}/{total}"
+        else:
+            # 全量翻译
+            self.progress_bar.setMaximum(total)
+            self.progress_bar.setValue(current_idx + (1 if is_finished else 0))
+            task_status = f"全局进度: {current_idx+1}/{total}"
+
         now = time.time()
-        # 2. UI 更新限制：
-        # - 流式渲染（trans_text_edit）采用 100ms 降频以保证流畅
-        # - 列表刷新（table）仅在 is_finished=True 时进行，消除卡顿
-        
         # 处理编辑器实时显示 (流式)
         if not is_finished:
             if now - self._last_ui_update > 0.1: # 100ms 节流
-                self.status_label.setText(f"正在翻译进度: {current_idx+1}/{total} (流式传输中...)")
+                self.status_label.setText(f"{task_status} (流式传输中...)")
                 self.orig_text_edit.setPlainText(orig)
                 self.trans_text_edit.setPlainText(trans)
                 self._last_ui_update = now
@@ -627,12 +641,13 @@ class MainWindow(QMainWindow):
         # 3. Auto-follow: Select the row being completed
         cur_row = self.group_table.currentRow()
         if cur_row != current_idx:
+            # 如果当前没在编辑这行，自动跳转到这行
             self.group_table.selectRow(current_idx)
         else:
             self.orig_text_edit.setPlainText(orig)
             self.trans_text_edit.setPlainText(trans)
         
-        self.status_label.setText(f"总进度: {current_idx+1}/{total} (当前块处理完成)")
+        self.status_label.setText(f"{task_status} (当前块已保存)")
 
     def save_manual_edit(self):
         if not self.processor or not self.current_cache_data:
