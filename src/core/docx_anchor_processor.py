@@ -157,7 +157,10 @@ class DocxAnchorProcessor:
         return "\n".join(lines)
 
     def validate_and_parse_response(self, response_text, original_group):
-        """同 EPUB"""
+        """
+        校验 AI 响应的结构并解析。根据序列分隔符提取。
+        同时校验内部锚点 (⦗n⦘) 和 ⟦⟧ 符号。
+        """
         pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
         group_match = re.search(pattern, response_text)
         if not group_match:
@@ -171,7 +174,19 @@ class DocxAnchorProcessor:
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content, re.DOTALL)
             if match:
-                translated_texts.append(match.group(1).strip())
+                block_text = match.group(1).strip()
+                translated_texts.append(block_text)
+                
+                # --- 增加：内部锚点一致性校验 ---
+                orig_block = original_group[i]
+                orig_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), orig_block['text']))
+                trans_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), block_text))
+                
+                if orig_anchors != trans_anchors:
+                    return None, False
+                
+                if block_text.count(self.TS) != block_text.count(self.TE):
+                    return None, False
             else:
                 return None, False
         

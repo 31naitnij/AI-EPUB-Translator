@@ -301,7 +301,8 @@ class Processor:
                 _, ok = self.epub_anchor_processor.validate_and_parse_response(full_translation, group_blocks)
                 
             if not ok:
-                full_translation = f"【结构校验失败，请手动检查】\n{full_translation}"
+                if not full_translation.startswith("【结构校验失败，请手动检查】"):
+                    full_translation = f"【结构校验失败，请手动检查】\n{full_translation}"
                 chunk["is_error"] = True
             else:
                 chunk["is_error"] = False

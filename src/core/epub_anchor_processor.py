@@ -160,6 +160,7 @@ class EPubAnchorProcessor:
     def validate_and_parse_response(self, response_text, original_group):
         """
         校验 AI 响应的结构并解析。根据序列分隔符提取。
+        同时校验内部锚点 (⦗n⦘) 的对齐和 ⟦⟧ 符号的闭合。
         """
         pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
         group_match = re.search(pattern, response_text)
@@ -169,14 +170,33 @@ class EPubAnchorProcessor:
         content = group_match.group(1).strip()
         translated_texts = []
         
+        # 内部标签括号
+        TS, TE = "⟦", "⟧"
+        
         # 按顺序寻找分隔符
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
-            # 构造正则匹配此块。注意分隔符本身是稀有的，直接匹配即可
+            # 构造正则匹配此块
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content, re.DOTALL)
             if match:
-                translated_texts.append(match.group(1).strip())
+                block_text = match.group(1).strip()
+                translated_texts.append(block_text)
+                
+                # --- 增加：内部锚点一致性校验 ---
+                orig_block = original_group[i]
+                # 提取原始块中的所有锚点 ID
+                orig_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), orig_block['text']))
+                # 提取翻译块中的所有锚点 ID
+                trans_anchors = set(re.findall(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), block_text))
+                
+                # 如果锚点 ID 不完全一致（多了或少了），则判定失败
+                if orig_anchors != trans_anchors:
+                    return None, False
+                
+                # 校验 ⟦ ⟧ 符号的数量是否一致（基本闭合检查）
+                if block_text.count(TS) != block_text.count(TE):
+                    return None, False
             else:
                 return None, False
         

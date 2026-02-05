@@ -395,11 +395,27 @@ class MainWindow(QMainWindow):
                     # ID
                     self.group_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
                     # Status
-                    status_str = "已翻译" if c_data["trans"] else "未翻译"
-                    self.group_table.setItem(row, 1, QTableWidgetItem(status_str))
+                    status_str = "未翻译"
+                    if c_data["trans"]:
+                        status_str = "格式错误" if c_data.get("is_error") else "已翻译"
+                    
+                    status_item = QTableWidgetItem(status_str)
+                    if c_data.get("is_error"):
+                        status_item.setBackground(Qt.yellow)
+                    self.group_table.setItem(row, 1, status_item)
+                    
                     # Preview
                     preview = c_data["orig"][:50].replace("\n", " ") + "..."
-                    self.group_table.setItem(row, 2, QTableWidgetItem(preview))
+                    preview_item = QTableWidgetItem(preview)
+                    if c_data.get("is_error"):
+                        preview_item.setBackground(Qt.yellow)
+                    self.group_table.setItem(row, 2, preview_item)
+                    
+                    # ID item background too
+                    id_item = QTableWidgetItem(str(row + 1))
+                    if c_data.get("is_error"):
+                        id_item.setBackground(Qt.yellow)
+                    self.group_table.setItem(row, 0, id_item)
                     
                     row += 1
             
@@ -575,9 +591,21 @@ class MainWindow(QMainWindow):
         
         # 2. Update Table Status
         if current_idx < self.group_table.rowCount():
-             status_item = self.group_table.item(current_idx, 1)
-             if status_item:
-                 status_item.setText("翻译中..." if not is_finished else "已翻译")
+            status_item = self.group_table.item(current_idx, 1)
+            if status_item:
+                if is_finished:
+                    f_idx, c_idx = self.flat_chunks[current_idx]
+                    chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
+                    if chunk.get("is_error"):
+                        status_item.setText("格式错误")
+                        for col in range(self.group_table.columnCount()):
+                            self.group_table.item(current_idx, col).setBackground(Qt.yellow)
+                    else:
+                        status_item.setText("已翻译")
+                        for col in range(self.group_table.columnCount()):
+                            self.group_table.item(current_idx, col).setBackground(Qt.transparent)
+                else:
+                    status_item.setText("翻译中...")
         
         # 3. Auto-follow: Select the row being translated
         # Check if we need to switch view
@@ -603,19 +631,37 @@ class MainWindow(QMainWindow):
         file_path = self.epub_path_edit.text()
         cache_file = self.processor.get_cache_filename(file_path)
         
-        # 1. Sync current editor content to memory first
+        # 1. Sync current editor content to memory and RE-VALIDATE
         if hasattr(self, 'current_indices'):
             ch_idx, ck_idx = self.current_indices
-            self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]["trans"] = self.trans_text_edit.toPlainText()
+            trans_text = self.trans_text_edit.toPlainText()
+            self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]["trans"] = trans_text
+             
+            # --- Re-check Logic ---
+            chunk = self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]
+            g_indices = chunk.get("block_indices", [])
+            group_blocks = [{"text": self.current_cache_data["all_blocks"][idx]["text"], "formats": self.current_cache_data["all_blocks"][idx]["formats"]} for idx in g_indices]
             
-            # Update table preview just in case
+            if self.current_mode == "docx_anchor":
+                _, ok = self.processor.docx_anchor_processor.validate_and_parse_response(trans_text, group_blocks)
+            else:
+                _, ok = self.processor.epub_anchor_processor.validate_and_parse_response(trans_text, group_blocks)
+            
+            chunk["is_error"] = not ok
+            
+            # Update table UI
             if hasattr(self, 'current_flat_idx_view'):
                 row = self.current_flat_idx_view
-                self.group_table.item(row, 1).setText("已翻译" if self.trans_text_edit.toPlainText() else "未翻译")
-
+                status_text = "已翻译" if ok else "格式错误"
+                bg_color = Qt.transparent if ok else Qt.yellow
+                
+                self.group_table.item(row, 1).setText(status_text)
+                for col in range(self.group_table.columnCount()):
+                    self.group_table.item(row, col).setBackground(bg_color)
+             
         # 2. Save the entire in-memory data to disk
         self.processor.save_cache(cache_file, self.current_cache_data)
-        self.status_label.setText(f"所有手动修改已保存到缓存文件。")
+        self.status_label.setText(f"所有手动修改已保存并重新校验。")
 
     def clear_cache(self):
         file_path = self.epub_path_edit.text()
