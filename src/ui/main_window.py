@@ -2,9 +2,10 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QComboBox, QFileDialog, QSplitter, QProgressBar,
                              QMessageBox, QGroupBox, QSpinBox, QDoubleSpinBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox)
-from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication
-from PySide6.QtGui import QFont, QIcon
+                             QTableWidget, QTableWidgetItem, QHeaderView, 
+                             QAbstractItemView, QCheckBox, QPlainTextEdit)
+from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication, QRect, QSize
+from PySide6.QtGui import QFont, QIcon, QPainter, QColor, QTextFormat
 import os
 import sys
 import shutil
@@ -41,6 +42,92 @@ class TranslationWorker(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+
+class LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+    def sizeHint(self):
+        return QSize(self.editor.lineNumberAreaWidth(), 0)
+
+    def paintEvent(self, event):
+        self.editor.lineNumberAreaPaintEvent(event)
+
+class CodeEditor(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lineNumberArea = LineNumberArea(self)
+
+        self.blockCountChanged.connect(self.updateLineNumberAreaWidth)
+        self.updateRequest.connect(self.updateLineNumberArea)
+        self.cursorPositionChanged.connect(self.highlightCurrentLine)
+
+        self.updateLineNumberAreaWidth(0)
+        self.highlightCurrentLine()
+
+        # 背景色与 premium 质感
+        self.setStyleSheet("background-color: #ffffff; border: 1px solid #dcdcdc; border-radius: 4px;")
+        
+    def lineNumberAreaWidth(self):
+        digits = 1
+        max_value = max(1, self.blockCount())
+        while max_value >= 10:
+            max_value /= 10
+            digits += 1
+        space = 5 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+
+    def updateLineNumberAreaWidth(self, _):
+        self.setViewportMargins(self.lineNumberAreaWidth(), 0, 0, 0)
+
+    def updateLineNumberArea(self, rect, dy):
+        if dy:
+            self.lineNumberArea.scroll(0, dy)
+        else:
+            self.lineNumberArea.update(0, rect.y(), self.lineNumberArea.width(), rect.height())
+
+        if rect.contains(self.viewport().rect()):
+            self.updateLineNumberAreaWidth(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.lineNumberArea.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+
+    def highlightCurrentLine(self):
+        extraSelections = []
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            lineColor = QColor("#f0faff") # 极浅蓝提示当前行
+            selection.format.setBackground(lineColor)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extraSelections.append(selection)
+        self.setExtraSelections(extraSelections)
+
+    def lineNumberAreaPaintEvent(self, event):
+        painter = QPainter(self.lineNumberArea)
+        # 绘制行号区背景
+        painter.fillRect(event.rect(), QColor("#f8f8f8"))
+        
+        block = self.firstVisibleBlock()
+        blockNumber = block.blockNumber()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(blockNumber + 1)
+                painter.setPen(QColor("#999999")) # 行号颜色
+                painter.drawText(0, top, self.lineNumberArea.width() - 2, self.fontMetrics().height(),
+                                 Qt.AlignRight, number)
+
+            block = block.next()
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+            blockNumber += 1
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -198,10 +285,10 @@ class MainWindow(QMainWindow):
         editor_layout.addWidget(QLabel("3. 翻译对照 (组级别)"))
 
         self.editor_splitter = QSplitter(Qt.Horizontal)
-        self.orig_text_edit = QTextEdit()
+        self.orig_text_edit = CodeEditor()
         self.orig_text_edit.setPlaceholderText("API 请求文本 (带锚点)...")
         self.orig_text_edit.setReadOnly(True)
-        self.trans_text_edit = QTextEdit()
+        self.trans_text_edit = CodeEditor()
         self.trans_text_edit.setPlaceholderText("API 响应译文...")
         self.editor_splitter.addWidget(self.orig_text_edit)
         self.editor_splitter.addWidget(self.trans_text_edit)
