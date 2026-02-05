@@ -122,14 +122,16 @@ class EPubAnchorProcessor:
         2. 对大型容器进行递归拆分，确保单次翻译不超负荷。
         """
         blocks = []
-        # 定义核心语义块标签
+        # 定义终端语义标签（尽量保持这一级的分块，除非其所在的容器非常小）
         semantic_tags = {
             'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
-            'li', 'td', 'th', 'caption', 'figcaption', 
-            'blockquote', 'dt', 'dd', 'cite', 'footer', 'aside'
+            'li', 'caption', 'figcaption', 'dt', 'dd', 'cite', 'footer', 'aside'
         }
-        # 定义容器标签
-        container_tags = {'div', 'section', 'article', 'body'}
+        # 定义容器标签（如果容器足够小，则聚合为一块；否则深入递归）
+        container_tags = {
+            'div', 'section', 'article', 'body', 'table', 'tr', 'td', 'th', 
+            'blockquote', 'thead', 'tbody', 'tfoot', 'dl', 'ol', 'ul'
+        }
         
         # 聚合阈值：如果一个容器的总字符数小于此值，则将其视为一个整体块
         # 这能保证“1. [段落]”或“标题 [段落]”在视觉上较短时被归为一块
