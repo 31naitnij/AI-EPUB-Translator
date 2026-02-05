@@ -88,7 +88,12 @@ class Processor:
             # 为了兼容性，我们把 chunks 数组替换为仅包含基础结构但不含文字的新数组
             # 或者干脆在这里保存一份全量的作为备份？
             # 考虑到用户要求“单独做缓存”，我们还是把 chunks 剥离
-            pass 
+            # Strip chunks from metadata to prevent redundancy
+            for f_info in meta["files"]:
+                if "chunks" in f_info:
+                    # Replace actual chunk list with a placeholder count or empty list
+                    # logic relies on loading chunks from individual files
+                    f_info["chunks"] = [] 
         
         path = os.path.join(cache_dir, "metadata.json")
         with open(path, 'w', encoding='utf-8') as f:
@@ -322,26 +327,7 @@ class Processor:
         self.save_metadata(input_path, cached_data)
         return True
 
-    def run_manual_verification(self, file_path, callback=None):
-        cached_data = self.load_cache(file_path)
-        if not cached_data: return False
 
-        flat_list = [(f_i, c_i) for f_i, f_data in enumerate(cached_data["files"]) for c_i, c_data in enumerate(f_data["chunks"])]
-        for i, (f_idx, c_idx) in enumerate(flat_list):
-            chunk = cached_data["files"][f_idx]["chunks"][c_idx]
-            if not chunk["trans"]: continue
-
-            error_prefix = "【结构校验失败，请手动检查】"
-            if chunk["trans"].startswith(error_prefix):
-                chunk["trans"] = chunk["trans"][len(error_prefix):].lstrip()
-            
-            chunk["is_error"] = False
-            self.save_chunk(file_path, i, chunk)
-            if callback: callback(i, len(flat_list), chunk["orig"], chunk["trans"], True)
-        
-        self.save_metadata(file_path, cached_data)
-        self.status = "idle"
-        return True
 
     def finalize_translation(self, input_path, output_path, target_format=None):
         ext = os.path.splitext(input_path)[1].lower()

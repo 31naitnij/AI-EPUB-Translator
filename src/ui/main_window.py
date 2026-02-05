@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("开始翻译")
         self.btn_stop = QPushButton("停止")
         self.btn_clear_cache = QPushButton("清除缓存")
-        self.btn_manual_verify = QPushButton("内容清理")
+
         self.btn_output = QPushButton("导出")
         
         self.btn_prepare.clicked.connect(self.prepare_chunks_only)
@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_translation)
         self.btn_stop.clicked.connect(self.stop_translation)
         self.btn_clear_cache.clicked.connect(self.clear_cache)
-        self.btn_manual_verify.clicked.connect(self.on_manual_verify)
+
         self.btn_output.clicked.connect(self.export_epub)
         
         self.btn_translate_sel.setEnabled(False)
@@ -342,7 +342,7 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(self.btn_translate_sel)
         ctrl_row.addWidget(self.btn_start)
         ctrl_row.addWidget(self.btn_stop)
-        ctrl_row.addWidget(self.btn_manual_verify)
+
         ctrl_row.addWidget(self.btn_clear_cache)
         ctrl_row.addWidget(self.btn_output)
         bottom_layout.addLayout(ctrl_row)
@@ -747,9 +747,8 @@ class MainWindow(QMainWindow):
             return
             
         file_path = self.epub_path_edit.text()
-        cache_file = self.processor.get_cache_filename(file_path)
         
-        # 1. Sync current editor content to memory and RE-VALIDATE
+        # 1. Sync current editor content to memory
         if hasattr(self, 'current_indices'):
             ch_idx, ck_idx = self.current_indices
             trans_text = self.trans_text_edit.toPlainText()
@@ -761,28 +760,27 @@ class MainWindow(QMainWindow):
                 self.group_table.item(row, 1).setText("已翻译")
                 for col in range(self.group_table.columnCount()):
                     self.group_table.item(row, col).setBackground(Qt.transparent)
-             
-        # 2. Save the entire in-memory data to disk
-        self.processor.save_cache(cache_file, self.current_cache_data)
-        self.status_label.setText(f"所有手动修改已保存并重新校验。")
-
-    def on_manual_verify(self):
-        if not self.processor: return
-        file_path = self.epub_path_edit.text()
-        if not file_path:
-            QMessageBox.warning(self, "警告", "请先选择并加载文件。")
-            return
             
-        self.status_label.setText("正在执行内容清理...")
-        QCoreApplication.processEvents()
-        
-        success = self.processor.run_manual_verification(file_path, callback=self.on_progress)
-        
-        if success:
-            self.status_label.setText("内容清理已完成。")
-            QMessageBox.information(self, "完成", "已清理所有翻译块中的错误标记。")
-        else:
-            self.status_label.setText("清理失败。")
+            # --- CRITICAL FIX START ---
+            # 2. Persist to Disk (Individual Chunk)
+            # Find the flat index for this chunk (needed for save_chunk)
+            # Assuming current_flat_idx_view is the correct flat index
+            flat_idx = self.current_flat_idx_view
+            chunk_data = self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]
+            
+            try:
+                self.processor.save_chunk(file_path, flat_idx, chunk_data)
+                
+                # 3. Apply to Source Mirror (for Export)
+                self.processor.apply_chunk_to_mirror(file_path, self.current_cache_data, flat_idx)
+                
+                self.status_label.setText(f"修改已保存至磁盘并更新导出镜像 (ID: {flat_idx+1})")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存失败: {e}")
+                return
+            # --- CRITICAL FIX END ---
+
+
 
     def clear_cache(self):
         file_path = self.epub_path_edit.text()
