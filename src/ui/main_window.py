@@ -227,6 +227,11 @@ class MainWindow(QMainWindow):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         
         ctrl_row = QHBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.btn_prepare = QPushButton("分块并分组")
+        self.btn_translate_sel = QPushButton("翻译选中组")
+        self.btn_start = QPushButton("开始翻译")
+        self.btn_stop = QPushButton("停止")
         self.btn_clear_cache = QPushButton("清除缓存")
         self.btn_manual_verify = QPushButton("格式校验")
         self.btn_output = QPushButton("导出")
