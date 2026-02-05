@@ -502,15 +502,29 @@ class MainWindow(QMainWindow):
 
     def translate_selected_chunk(self):
         # Translate ALL selected rows
-        if not self.init_processor_and_chunks(): return # Ensure init (though mostly redundant if already loaded)
-        
-        # Get selected rows
+        if not self.processor:
+            if not self.init_processor_and_chunks(): return 
+
+        # Get selected rows BEFORE any potential re-init (though we avoided it above)
         selected_items = self.group_table.selectedItems()
         rows = sorted(list(set(item.row() for item in selected_items)))
         
         if not rows:
             QMessageBox.warning(self, "提示", "请先在列表中选择要翻译的块")
             return
+
+        # --- 实时反馈优化 ---
+        # 记录当前任务的选中索引，用于进度计算
+        self.current_task_indices = rows
+        
+        # 立即跳转并定位到第一个选中项
+        first_row = rows[0]
+        self.group_table.selectRow(first_row)
+        if hasattr(self, 'flat_chunks') and hasattr(self, 'current_cache_data'):
+            f_idx, c_idx = self.flat_chunks[first_row]
+            chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
+            self.orig_text_edit.setPlainText(chunk["orig"])
+            self.trans_text_edit.setPlainText(chunk["trans"] or "")
 
         settings = self.get_current_settings()
         translator = Translator(
@@ -529,6 +543,9 @@ class MainWindow(QMainWindow):
         self.btn_output.setEnabled(False)
         self.btn_clear_cache.setEnabled(False)
         
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(len(rows))
+
         self.worker = TranslationWorker(
             self.processor, 
             translator, 
@@ -582,6 +599,7 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_finished)
         self.worker.error.connect(self.on_error)
         self.worker.start()
+        self.current_task_indices = None # 清除选定项记忆，回归全局进度
         self.status_label.setText("全部翻译执行中...")
 
     def stop_translation(self):
