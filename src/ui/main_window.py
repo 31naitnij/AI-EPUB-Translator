@@ -800,22 +800,42 @@ class MainWindow(QMainWindow):
         
         if reply == QMessageBox.Yes:
             deleted = False
-            # 1. 删除新版文件夹缓存
+            # 1. robustly delete new folder cache
             if os.path.exists(folder_cache):
                 import shutil
-                shutil.rmtree(folder_cache)
-                deleted = True
+                try:
+                    # 使用 ignore_errors=True 强制删除，防止被文件锁阻塞
+                    shutil.rmtree(folder_cache, ignore_errors=True)
+                    # Double check if it's gone, if not, try once more or just proceed
+                    if os.path.exists(folder_cache):
+                        shutil.rmtree(folder_cache, ignore_errors=True)
+                    deleted = True
+                except Exception as e:
+                    QMessageBox.warning(self, "警告", f"清除缓存文件夹时遇到问题: {e}")
             
             # 2. 删除旧版单文件缓存
             if os.path.exists(legacy_cache):
-                os.remove(legacy_cache)
-                deleted = True
+                try:
+                    os.remove(legacy_cache)
+                    deleted = True
+                except:
+                    pass
                 
+            # 3. Always clear internal state regardless of file deletion success
+            # This ensures "Zombie" data doesn't persist in memory
+            self.current_cache_data = None
+            if hasattr(self, 'flat_chunks'):
+                self.flat_chunks = []
+            self.group_table.setRowCount(0)
+            self.block_table.setRowCount(0)
+            self.orig_text_edit.clear()
+            self.trans_text_edit.clear()
+            self.status_label.setText("缓存已清除，请重新点击 '分块并分组'")
+            
             if deleted:
-                QMessageBox.information(self, "成功", "所有缓存已清除（包括旧版文件）。")
-                self.init_processor_and_chunks() # 刷新列表
+                QMessageBox.information(self, "成功", f"已清除缓存目录:\n{folder_cache}")
             else:
-                QMessageBox.information(self, "提示", "未发现现有缓存。")
+                QMessageBox.information(self, "提示", "未发现现有缓存或缓存已被清除。")
 
     def on_finished(self, complete):
         self.btn_start.setEnabled(True)
@@ -850,8 +870,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先初始化并翻译文件。")
             return
 
-        cache_file = self.processor.get_cache_filename(file_path)
-        cache_data = self.processor.load_cache(cache_file)
+        # cache_file = self.processor.get_cache_filename(file_path)
+        # load_cache expects the INPUT file path, not the cache path
+        cache_data = self.processor.load_cache(file_path)
         
         if not cache_data:
             QMessageBox.warning(self, "警告", "未找到翻译缓存。")

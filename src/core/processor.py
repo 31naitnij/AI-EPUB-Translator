@@ -81,19 +81,22 @@ class Processor:
     def save_metadata(self, input_path, data):
         """保存结构性元数据，排除大的 chunk 数据以免冗余"""
         cache_dir = self.ensure_cache_dir(input_path)
-        # 复制一份，移除 chunks 后保存
+        
+        # Deep copy logic for files to avoid modifying the in-memory data object
+        # We only need to copy the structure we are about to modify (the files list)
         meta = data.copy()
         if meta.get("files"):
-            # 我们在元数据中只保留 chunk 的“占位符”或数量信息
-            # 为了兼容性，我们把 chunks 数组替换为仅包含基础结构但不含文字的新数组
-            # 或者干脆在这里保存一份全量的作为备份？
-            # 考虑到用户要求“单独做缓存”，我们还是把 chunks 剥离
-            # Strip chunks from metadata to prevent redundancy
+            # Create a new list for files to avoid modifying the original list in 'data'
+            new_files_list = []
             for f_info in meta["files"]:
-                if "chunks" in f_info:
-                    # Replace actual chunk list with a placeholder count or empty list
-                    # logic relies on loading chunks from individual files
-                    f_info["chunks"] = [] 
+                # Create a copy of the file info dict
+                new_f_info = f_info.copy()
+                if "chunks" in new_f_info:
+                    # Replace actual chunk list with empty dicts to preserve count
+                    # This is CRITICAL for load_cache to know how many chunks to load
+                    new_f_info["chunks"] = [{} for _ in new_f_info["chunks"]]
+                new_files_list.append(new_f_info)
+            meta["files"] = new_files_list
         
         path = os.path.join(cache_dir, "metadata.json")
         with open(path, 'w', encoding='utf-8') as f:
