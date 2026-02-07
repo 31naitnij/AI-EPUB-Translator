@@ -458,8 +458,7 @@ class MainWindow(QMainWindow):
         self.processor = Processor(cache_dir)
         
         try:
-            if not autoload:
-                self.status_label.setText(f"正在执行分块解析...")
+            self.update_status("正在初始化处理器...")
             
             ext = os.path.splitext(file_path)[1].lower()
             if ext == ".docx":

@@ -18,7 +18,7 @@ class Processor:
         """兼容旧接口，内部转发到新逻辑"""
         self.save_metadata(input_path, cached_data)
 
-    def load_cache(self, input_path):
+    def load_cache(self, input_path, callback=None):
         """兼容旧接口，内部转发到新逻辑并聚合数据"""
         data = self.load_metadata(input_path)
         if not data: return None
@@ -32,19 +32,20 @@ class Processor:
              total_chunks = len(data["files"][0]["chunks"])
              new_chunks = []
              for i in range(total_chunks):
+                 if callback and i % 5 == 0: 
+                     callback(f"正在加载缓存分块: {i+1}/{total_chunks}")
                  chunk_data = self.load_chunk(input_path, i)
                  if chunk_data:
                      new_chunks.append(chunk_data)
                  else:
-                     # 应该不会发生，但提供兜底
                      new_chunks.append({"orig": "", "trans": "", "block_indices": [], "is_error": False})
              data["files"][0]["chunks"] = new_chunks
              
         # 缓存加载后，自动验证所有已翻译块的格式
-        self.validate_all_chunks(input_path, data)
+        self.validate_all_chunks(input_path, data, callback=callback)
         return data
     
-    def validate_all_chunks(self, input_path, cached_data):
+    def validate_all_chunks(self, input_path, cached_data, callback=None):
         """
         遍历所有已翻译的块，验证格式并更新 is_error 标志。
         """
@@ -52,10 +53,13 @@ class Processor:
             return
             
         for f_data in cached_data["files"]:
-            for chunk in f_data.get("chunks", []):
+            chunks = f_data.get("chunks", [])
+            total = len(chunks)
+            for i, chunk in enumerate(chunks):
+                if callback and i % 10 == 0:
+                    callback(f"正在验证翻译格式: {i+1}/{total}")
                 trans_text = chunk.get("trans", "")
                 if not trans_text:
-                    # 未翻译，不需要验证
                     chunk["is_error"] = False
                     continue
                     
@@ -157,7 +161,7 @@ class Processor:
     def process_epub_anchor_init(self, input_path, max_chars, only_load=False, callback=None):
         cached_data = self.load_metadata(input_path)
         if cached_data and cached_data.get("source_type") == "epub_anchor":
-            return self.load_cache(input_path)
+            return self.load_cache(input_path, callback=callback)
 
         if only_load: return None
 
@@ -166,10 +170,12 @@ class Processor:
         self.epub_anchor_processor.temp_dir = temp_dir
         
         xhtml_files = self.epub_anchor_processor.get_xhtml_files()
+        total_files = len(xhtml_files)
         all_blocks = []
         files_info = []
         
-        for xhtml_file in xhtml_files:
+        for idx, xhtml_file in enumerate(xhtml_files):
+            if callback: callback(f"正在解析文件: {idx+1}/{total_files} ({os.path.basename(xhtml_file)})")
             rel_path = os.path.relpath(xhtml_file, temp_dir)
             with open(xhtml_file, 'r', encoding='utf-8') as f:
                 soup = BeautifulSoup(f, 'html.parser')
@@ -238,7 +244,7 @@ class Processor:
     def process_docx_anchor_init(self, input_path, max_chars, only_load=False, callback=None):
         cached_data = self.load_metadata(input_path)
         if cached_data and cached_data.get("source_type") == "docx_anchor":
-            return self.load_cache(input_path)
+            return self.load_cache(input_path, callback=callback)
         if only_load: return None
 
         # 使用永久镜像目录
@@ -246,10 +252,12 @@ class Processor:
         self.docx_anchor_processor.temp_dir = temp_dir
         
         xml_files = self.docx_anchor_processor.get_xml_files()
+        total_files = len(xml_files)
         all_blocks = []
         files_info = []
         
-        for xml_file in xml_files:
+        for idx, xml_file in enumerate(xml_files):
+            if callback: callback(f"正在解析文件: {idx+1}/{total_files} ({os.path.basename(xml_file)})")
             rel_path = os.path.relpath(xml_file, temp_dir)
             with open(xml_file, 'r', encoding='utf-8') as f:
                 soup = BeautifulSoup(f, 'xml')
