@@ -39,7 +39,28 @@ class Processor:
                      # 应该不会发生，但提供兜底
                      new_chunks.append({"orig": "", "trans": "", "block_indices": [], "is_error": False})
              data["files"][0]["chunks"] = new_chunks
+             
+        # 缓存加载后，自动验证所有已翻译块的格式
+        self.validate_all_chunks(input_path, data)
         return data
+    
+    def validate_all_chunks(self, input_path, cached_data):
+        """
+        遍历所有已翻译的块，验证格式并更新 is_error 标志。
+        """
+        if not cached_data or not cached_data.get("files"):
+            return
+            
+        for f_data in cached_data["files"]:
+            for chunk in f_data.get("chunks", []):
+                trans_text = chunk.get("trans", "")
+                if not trans_text:
+                    # 未翻译，不需要验证
+                    chunk["is_error"] = False
+                    continue
+                    
+                is_valid = self.check_chunk_format(input_path, trans_text)
+                chunk["is_error"] = not is_valid
 
     def get_cache_dir_path(self, input_path):
         """获取书籍的缓存文件夹路径"""
@@ -287,6 +308,32 @@ class Processor:
         self.save_metadata(input_path, cached_data)
         return cached_data
 
+    def check_chunk_format(self, input_path, text, source_type=None):
+        """
+        Helper to check format based on source type
+        """
+        if not source_type:
+            # Try to guess or load meta? Better to pass it or rely on processor state
+            # Assuming processor state is consistent or text has markers
+            if "⟬" in text: # Simple heuristic if needed, but better to use specific processor
+                pass
+        
+        # We need the correct processor instance.
+        # But Processor keeps them.
+        # Simplest: check both or check based on ext.
+        ext = os.path.splitext(input_path)[1].lower()
+        if ext == ".docx":
+            return self.docx_anchor_processor.check_anchor_format(text)
+        else:
+            return self.epub_anchor_processor.check_anchor_format(text)
+
+    def auto_repair_chunk(self, input_path, chunk_text):
+        ext = os.path.splitext(input_path)[1].lower()
+        if ext == ".docx":
+            return self.docx_anchor_processor.repair_translated_text(chunk_text)
+        else:
+            return self.epub_anchor_processor.repair_translated_text(chunk_text)
+
     def process_run(self, input_path, translator, context_rounds=1, callback=None, target_indices=None):
         cached_data = self.load_cache(input_path)
         if not cached_data: return False
@@ -316,11 +363,18 @@ class Processor:
                 if callback: callback(i, len(flat_list), chunk["orig"], full_translation, False)
             
             chunk["trans"] = full_translation
-            chunk["is_error"] = False
-            self.save_chunk(input_path, i, chunk)
             
-            # 核心改进：实时回写翻译到镜像
-            self.apply_chunk_to_mirror(input_path, cached_data, i)
+            # --- CRITICAL CHANGE: Validate format instead of auto-repairing ---
+            is_valid = self.check_chunk_format(input_path, full_translation)
+            if is_valid:
+                chunk["is_error"] = False # or "has_anchor_error"
+                # Only apply to mirror if valid!
+                self.apply_chunk_to_mirror(input_path, cached_data, i)
+            else:
+                chunk["is_error"] = True # Flag as error for UI
+                # Do NOT apply to mirror to avoid breaking file structure
+            
+            self.save_chunk(input_path, i, chunk)
             
             if callback: callback(i, len(flat_list), chunk["orig"], full_translation, True)
             if target_indices is None: cached_data["current_flat_idx"] = i + 1
@@ -329,7 +383,6 @@ class Processor:
         if target_indices is None: cached_data["finished"] = True
         self.save_metadata(input_path, cached_data)
         return True
-
 
 
     def finalize_translation(self, input_path, output_path, target_format=None):
@@ -357,6 +410,10 @@ class Processor:
         chunk = cached_data["files"][f_idx]["chunks"][c_idx]
         if not chunk["trans"]: return
         
+        # Double check validity before applying (even if called manually)
+        if chunk.get("is_error", False):
+            return # Skip invalid chunks
+        
         # 确定受影响的文件
         block_to_file = cached_data.get("block_to_file", {})
         affected_files = set()
@@ -370,10 +427,11 @@ class Processor:
         orig_indices = chunk["block_indices"]
         group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in orig_indices]
         
+        # Passthrough auto_repair=False because we assume it's valid or already checked
         if source_type == "epub_anchor":
-            trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
+            trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
         else:
-            trans_texts, ok = self.docx_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
+            trans_texts, ok = self.docx_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
             
         if not ok: return
         

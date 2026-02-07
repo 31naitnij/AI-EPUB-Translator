@@ -61,22 +61,26 @@ class DocxAnchorProcessor:
 
     def extract_block_with_local_ids(self, element, include_nodes=False):
         """
-        核心逻辑：提取 DOCX 段落内容，将格式运行 <w:r> 转化为带编号的锚点。
+        核心逻辑：提取 DOCX 段落内容，将格式运行 <w:r> 转化为成对分隔符。
+        使用成对稀有字符 ⧖content⧖ 格式，字符本身即为唯一 ID。
         """
         format_tags = []
-        local_counter = [1]
+        local_counter = [0]  # 从 0 开始，用于索引 BLOCK_DELIMS
+
+        def get_delimiter(idx):
+            """获取第 idx 个分隔符"""
+            return self.BLOCK_DELIMS[idx % len(self.BLOCK_DELIMS)]
 
         def recursive_extract(node):
             if node.name == 't': # w:t 标签
                 return node.get_text().replace('<', '&lt;').replace('>', '&gt;')
             
             if node.name == 'r': # w:r 标签 (Run)
-                # 核心改进：为每一个 run 分配一个唯一 ID，确保 1:1 映射
-                tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
+                delim = get_delimiter(local_counter[0])
                 local_counter[0] += 1
                 
                 tag_info = {
-                    'id': tag_id,
+                    'id': delim,
                     'tag': 'r',
                     'type': 'run'
                 }
@@ -87,9 +91,10 @@ class DocxAnchorProcessor:
                 t_node = node.find('t', recursive=False)
                 if t_node:
                     inner_text = t_node.get_text().replace('<', '&lt;').replace('>', '&gt;')
-                    return f"{self.TS}{inner_text}{self.TE}{tag_id}"
+                    # 成对分隔符包裹内容
+                    return f"{delim}{inner_text}{delim}"
                 else:
-                    return tag_id
+                    return delim
                 
             # 处理其他子节点 (如 w:p 中的特殊标签)
             child_parts = []
@@ -141,10 +146,36 @@ class DocxAnchorProcessor:
         lines.append(self.GE)
         return "\n".join(lines)
 
-    def validate_and_parse_response(self, response_text, original_group):
+    def repair_translated_text(self, text):
         """
-        [彻底移除结构校验] 宽容解析：不再校验锚点一致性或符号闭合。
+        修复翻译文本中的成对分隔符格式问题。
+        检测每个分隔符，确保成对出现。
         """
+        for delim in self.BLOCK_DELIMS:
+            count = text.count(delim)
+            if count % 2 == 1:
+                text = text + delim
+        return text
+
+    def check_anchor_format(self, text):
+        """
+        检测成对分隔符格式完整性。
+        检查项：每个分隔符字符必须成对出现（偶数个）。
+        """
+        for delim in self.BLOCK_DELIMS:
+            count = text.count(delim)
+            if count % 2 != 0:
+                return False
+        return True
+
+    def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
+        """
+        [移除结构校验] 宽容解析。
+        auto_repair: 是否自动修复格式错误。
+        """
+        if auto_repair:
+            response_text = self.repair_translated_text(response_text)
+        
         # 1. 尝试提取 ⟬ ⟭ 内部内容
         pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
         group_match = re.search(pattern, response_text)

@@ -22,6 +22,10 @@ class EPubAnchorProcessor:
         self.AS = "⦗" # Anchor Start
         self.AE = "⦘" # Anchor End
         
+        # 内容标签符号 (与 DOCX 保持一致)
+        self.TS = "⟦" # Tag Start
+        self.TE = "⟧" # Tag End
+        
         # 块级分隔符池 (绝对稀有字符)
         self.BLOCK_DELIMS = "⧖⧗⧘⧙⧚⧛⧜⧝⧞⧟⨀⨁⨂⨃⨄⨅⨆⨇⨈⨉⨊⨋⨌⨍⨎⨏⨐⨑⨒⨓⨔⨕⨖⨗⨘⨙⨚⨛⨜⨝⨞⨟"
 
@@ -57,15 +61,16 @@ class EPubAnchorProcessor:
     def extract_block_with_local_ids(self, element):
         """
         核心逻辑：提取块内容，将所有 HTML 标签转化为带编号的锚点。
-        使用 ⟦内容⟧⦗ID⦘ 表示容器镜像，使用 ⦗ID⦘ 表示独立锚点。
+        使用成对稀有字符 ⧖content⧖ 格式，字符本身即为唯一 ID。
         """
         format_tags = []
-        local_counter = [1]
+        local_counter = [0]  # 从 0 开始，用于索引 BLOCK_DELIMS
         
         monolithic_tags = ['math', 'svg', 'canvas', 'video', 'audio']
-        
-        TS = "⟦" 
-        TE = "⟧"
+
+        def get_delimiter(idx):
+            """获取第 idx 个分隔符"""
+            return self.BLOCK_DELIMS[idx % len(self.BLOCK_DELIMS)]
 
         def recursive_extract(node, is_root=False):
             if isinstance(node, str):
@@ -73,16 +78,17 @@ class EPubAnchorProcessor:
             
             if hasattr(node, 'name'):
                 if node.name in monolithic_tags:
-                    tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
+                    delim = get_delimiter(local_counter[0])
                     local_counter[0] += 1
                     format_tags.append({
-                        'id': tag_id,
+                        'id': delim,
                         'tag': node.name,
                         'attrs': dict(node.attrs),
                         'raw_html': str(node),
                         'type': 'monolithic'
                     })
-                    return tag_id
+                    # 无内容的整体标签，只用分隔符标记位置
+                    return delim
                 
                 # 递归处理子节点
                 child_parts = []
@@ -93,11 +99,11 @@ class EPubAnchorProcessor:
                 if is_root:
                     return inner_content
                 
-                tag_id = f"{self.AS}{local_counter[0]}{self.AE}"
+                delim = get_delimiter(local_counter[0])
                 local_counter[0] += 1
                 
                 tag_info = {
-                    'id': tag_id,
+                    'id': delim,
                     'tag': node.name,
                     'attrs': dict(node.attrs),
                     'type': 'container'
@@ -105,9 +111,10 @@ class EPubAnchorProcessor:
                 format_tags.append(tag_info)
                 
                 if inner_content:
-                    return f"{TS}{inner_content}{TE}{tag_id}"
+                    # 成对分隔符包裹内容
+                    return f"{delim}{inner_content}{delim}"
                 else:
-                    return tag_id
+                    return delim
 
             return ""
 
@@ -209,10 +216,38 @@ class EPubAnchorProcessor:
         lines.append(self.GE)
         return "\n".join(lines)
 
-    def validate_and_parse_response(self, response_text, original_group):
+    def repair_translated_text(self, text):
         """
-        [彻底移除结构校验] 宽容解析：不再校验锚点一致性或符号闭合。
+        修复翻译文本中的成对分隔符格式问题。
+        检测每个分隔符，确保成对出现。
         """
+        # 新格式使用成对分隔符，修复逻辑：检查每个 BLOCK_DELIMS 字符是否成对
+        for delim in self.BLOCK_DELIMS:
+            count = text.count(delim)
+            if count % 2 == 1:
+                # 奇数个，说明缺少一个，在末尾补一个
+                text = text + delim
+        return text
+
+    def check_anchor_format(self, text):
+        """
+        检测成对分隔符格式完整性。
+        检查项：每个分隔符字符必须成对出现（偶数个）。
+        """
+        for delim in self.BLOCK_DELIMS:
+            count = text.count(delim)
+            if count % 2 != 0:
+                return False
+        return True
+
+    def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
+        """
+        [移除结构校验] 宽容解析。
+        auto_repair: 是否自动修复格式错误。
+        """
+        if auto_repair:
+            response_text = self.repair_translated_text(response_text)
+        
         pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
         group_match = re.search(pattern, response_text)
         if group_match:

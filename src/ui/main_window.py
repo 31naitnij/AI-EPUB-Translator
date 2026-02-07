@@ -344,6 +344,11 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(self.btn_stop)
 
         ctrl_row.addWidget(self.btn_clear_cache)
+        
+        self.btn_auto_fix = QPushButton("自动修复格式")
+        self.btn_auto_fix.clicked.connect(self.auto_fix_all)
+        ctrl_row.addWidget(self.btn_auto_fix)
+        
         ctrl_row.addWidget(self.btn_output)
         bottom_layout.addLayout(ctrl_row)
 
@@ -501,6 +506,10 @@ class MainWindow(QMainWindow):
                     # ID
                     id_item = QTableWidgetItem(str(row + 1))
                     self.group_table.setItem(row, 0, id_item)
+                    
+                    if c_data.get("is_error", False):
+                         for col in range(3):
+                             self.group_table.item(row, col).setBackground(QColor("#ffffcc"))
                     
                     row += 1
             
@@ -727,8 +736,16 @@ class MainWindow(QMainWindow):
                 chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
                 
                 status_item.setText("已翻译")
+                
+                # Color logic
+                if chunk.get("is_error", False):
+                     # Yellow for error
+                     bg_color = QColor("#ffffcc")
+                else:
+                     bg_color = Qt.transparent
+                     
                 for col in range(self.group_table.columnCount()):
-                    self.group_table.item(current_idx, col).setBackground(Qt.transparent)
+                    self.group_table.item(current_idx, col).setBackground(bg_color)
         
         # 3. Auto-follow: Select the row being completed
         cur_row = self.group_table.currentRow()
@@ -763,22 +780,79 @@ class MainWindow(QMainWindow):
             
             # --- CRITICAL FIX START ---
             # 2. Persist to Disk (Individual Chunk)
-            # Find the flat index for this chunk (needed for save_chunk)
-            # Assuming current_flat_idx_view is the correct flat index
             flat_idx = self.current_flat_idx_view
             chunk_data = self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]
             
-            try:
-                self.processor.save_chunk(file_path, flat_idx, chunk_data)
+            # 2.1 Re-validate format on manual save
+            is_valid = self.processor.check_chunk_format(file_path, trans_text)
+            if is_valid:
+                chunk_data["is_error"] = False
+                # Apply to mirror if valid
+                try:
+                    self.processor.save_chunk(file_path, flat_idx, chunk_data)
+                    self.processor.apply_chunk_to_mirror(file_path, self.current_cache_data, flat_idx)
+                    self.status_label.setText(f"修改已保存至磁盘并更新导出镜像 (ID: {flat_idx+1})")
+                    
+                    # Update UI color
+                    for col in range(self.group_table.columnCount()):
+                        self.group_table.item(row, col).setBackground(Qt.transparent)
+                        
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"保存失败: {e}")
+                    return
+            else:
+                chunk_data["is_error"] = True
+                self.processor.save_chunk(file_path, flat_idx, chunk_data) # Save even if invalid
+                self.status_label.setText(f"修改已保存，但检测到格式错误 (ID: {flat_idx+1})")
+                QMessageBox.warning(self, "格式警告", "检测到锚点格式错误（如缺少闭合符号）。\n该组将高亮显示，且暂时不会用于生成最终文档。")
                 
-                # 3. Apply to Source Mirror (for Export)
-                self.processor.apply_chunk_to_mirror(file_path, self.current_cache_data, flat_idx)
+                # Update UI color to Yellow
+                for col in range(self.group_table.columnCount()):
+                    self.group_table.item(row, col).setBackground(QColor("#ffffcc"))
+
+
+    def auto_fix_all(self):
+        if not self.processor or not self.current_cache_data: return
+        file_path = self.epub_path_edit.text()
+        
+        fixed_count = 0
+        
+        # Iterate all chunks
+        # Need to know total chunks. Rely on flat_chunks
+        if not hasattr(self, 'flat_chunks'): return
+        
+        for flat_idx, (f_idx, c_idx) in enumerate(self.flat_chunks):
+            chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
+            
+            if chunk.get("is_error", False):
+                # Attempt repair
+                original_trans = chunk["trans"]
+                repaired = self.processor.auto_repair_chunk(file_path, original_trans)
                 
-                self.status_label.setText(f"修改已保存至磁盘并更新导出镜像 (ID: {flat_idx+1})")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"保存失败: {e}")
-                return
-            # --- CRITICAL FIX END ---
+                if repaired != original_trans:
+                    chunk["trans"] = repaired
+                    chunk["is_error"] = False
+                    # Save and Apply
+                    self.processor.save_chunk(file_path, flat_idx, chunk)
+                    self.processor.apply_chunk_to_mirror(file_path, self.current_cache_data, flat_idx)
+                    
+                    # Update Table UI
+                    if flat_idx < self.group_table.rowCount():
+                        self.group_table.item(flat_idx, 1).setText("已翻译 (修复)")
+                        for col in range(self.group_table.columnCount()):
+                            self.group_table.item(flat_idx, col).setBackground(Qt.transparent)
+                            
+                    fixed_count += 1
+        
+        # If current editor is showing one of the fixed chunks, refresh it
+        if hasattr(self, 'current_flat_idx_view'):
+            # Reload to see changes
+            self.load_group_into_editor(self.current_flat_idx_view)
+            
+        if fixed_count > 0:
+            QMessageBox.information(self, "修复完成", f"已自动修复 {fixed_count} 个存在格式错误的组。")
+        else:
+            QMessageBox.information(self, "提示", "未发现可自动修复的错误。")
 
 
 
