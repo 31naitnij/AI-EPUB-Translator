@@ -16,61 +16,52 @@ class EPubAnchorProcessor:
         self.temp_dir = None
         self.format_counter = 0
         
-        # 稀有 Unicode 符号标记
-        self.GS = "⟬" # Group Start
-        self.GE = "⟭" # Group End
-        self.AS = "⦗" # Anchor Start
-        self.AE = "⦘" # Anchor End
-        
-        # 内容标签符号 (与 DOCX 保持一致)
-        self.TS = "⟦" # Tag Start
-        self.TE = "⟧" # Tag End
-        
-        # 块级分隔符池 (绝对稀有字符)
-        self.BLOCK_DELIMS = "⧖⧗⧘⧙⧚⧛⧜⧝⧞⧟⨀⨁⨂⨃⨄⨅⨆⨇⨈⨉⨊⨋⨌⨍⨎⨏⨐⨑⨒⨓⨔⨕⨖⨗⨘⨙⨚⨛⨜⨝⨞⨟"
+        # 组内块级分隔符池 (Sequence A: U+2A40 - U+2AA3)
+        self.BLOCK_DELIMS = "".join(chr(0x2A40 + i) for i in range(100))
+        # 块内标签分隔符池 (Sequence B: U+2B40 - U+2BA3)
+        self.INNER_DELIMS = "".join(chr(0x2B40 + i) for i in range(100))
 
     def get_block_delimiters(self, index):
+        """获取组内第 index 个块的分隔符 (Sequence A)"""
         char = self.BLOCK_DELIMS[index % len(self.BLOCK_DELIMS)]
+        return char, char
+
+    def get_inner_delimiters(self, index):
+        """获取块内第 index 个标签的分隔符 (Sequence B)"""
+        char = self.INNER_DELIMS[index % len(self.INNER_DELIMS)]
         return char, char
 
     def extract_epub(self, epub_path, callback=None):
         """将 EPUB 完整解压到临时目录"""
-        if callback: callback("正在解压 EPUB 文件...")
-        self.temp_dir = tempfile.mkdtemp(prefix="epub_trans_")
+        if callback: callback(f"正在解压 EPUB: {epub_path}")
+        self.temp_dir = tempfile.mkdtemp(prefix="epub_")
         with zipfile.ZipFile(epub_path, 'r') as zip_ref:
             zip_ref.extractall(self.temp_dir)
         return self.temp_dir
 
     def get_xhtml_files(self):
-        """遍历并返回需要翻译的 XHTML/HTML 文件路径，简单跳过结构性技术文件"""
-        xhtml_files = []
-        # 简单过滤：仅通过文件名跳过明确的结构性文件
-        skip_patterns = ['titlepage', 'title_page', 'cover', 'nav', 'toc', 'container.xml']
+        """返回 EPUB 中主要的 XHTML/HTML 内容文件"""
+        if not self.temp_dir:
+            return []
         
+        content_files = []
         for root, dirs, files in os.walk(self.temp_dir):
             for file in files:
-                lower_name = file.lower()
-                if lower_name.endswith(('.xhtml', '.html', '.htm')):
-                    if any(p in lower_name for p in skip_patterns):
-                        continue
-                    xhtml_files.append(os.path.join(root, file))
-        
-        xhtml_files.sort() # 强制排序，防止非确定性遍历导致块索引错位
-        return xhtml_files
+                if file.lower().endswith(('.xhtml', '.html', '.htm')):
+                    # 过滤掉一些明显的非内容文件 (如 nav.xhtml, toc.xhtml 等可选)
+                    # if 'nav' in file.lower() or 'toc' in file.lower(): continue
+                    content_files.append(os.path.join(root, file))
+        return content_files
 
     def extract_block_with_local_ids(self, element):
         """
-        核心逻辑：提取块内容，将所有 HTML 标签转化为带编号的锚点。
-        使用成对稀有字符 ⧖content⧖ 格式，字符本身即为唯一 ID。
+        核心逻辑：提取块内容，将所有 HTML 标签转化为块内序列锚点 (Sequence B)。
+        使用成对稀有字符 ⭀content⭀ 格式，由 INNER_DELIMS 提供序列。
         """
         format_tags = []
-        local_counter = [0]  # 从 0 开始，用于索引 BLOCK_DELIMS
+        local_counter = [0]
         
-        monolithic_tags = ['math', 'svg', 'canvas', 'video', 'audio']
-
-        def get_delimiter(idx):
-            """获取第 idx 个分隔符"""
-            return self.BLOCK_DELIMS[idx % len(self.BLOCK_DELIMS)]
+        monolithic_tags = ['math', 'svg', 'canvas', 'video', 'audio', 'img', 'br', 'hr']
 
         def recursive_extract(node, is_root=False):
             if isinstance(node, str):
@@ -78,7 +69,7 @@ class EPubAnchorProcessor:
             
             if hasattr(node, 'name'):
                 if node.name in monolithic_tags:
-                    delim = get_delimiter(local_counter[0])
+                    delim = self.get_inner_delimiters(local_counter[0])[0]
                     local_counter[0] += 1
                     format_tags.append({
                         'id': delim,
@@ -87,7 +78,6 @@ class EPubAnchorProcessor:
                         'raw_html': str(node),
                         'type': 'monolithic'
                     })
-                    # 无内容的整体标签，只用分隔符标记位置
                     return delim
                 
                 # 递归处理子节点
@@ -99,7 +89,7 @@ class EPubAnchorProcessor:
                 if is_root:
                     return inner_content
                 
-                delim = get_delimiter(local_counter[0])
+                delim = self.get_inner_delimiters(local_counter[0])[0]
                 local_counter[0] += 1
                 
                 tag_info = {
@@ -111,7 +101,6 @@ class EPubAnchorProcessor:
                 format_tags.append(tag_info)
                 
                 if inner_content:
-                    # 成对分隔符包裹内容
                     return f"{delim}{inner_content}{delim}"
                 else:
                     return delim
@@ -136,31 +125,40 @@ class EPubAnchorProcessor:
             'blockquote', 'thead', 'tbody', 'tfoot', 'dl', 'ol', 'ul'
         }
         
-        COHESIVE_THRESHOLD = 800
+        # 降阈值，强制拆分容器标签为更小的语义块
+        COHESIVE_THRESHOLD = 1 
 
         def get_text_size(node):
+            if not node: return 0
             if isinstance(node, str):
                 return len(node.strip())
-            return len(node.get_text().strip())
+            # 改进：更加严格的文本提取，排除掉仅包含空白字符的情况
+            text = node.get_text(strip=True)
+            return len(text)
 
         def tag_and_add_block(node):
             size = get_text_size(node)
             if size > 0:
                 # 核心改进：ID-Aware 发现逻辑
-                # 如果这个节点已经有了全局编号，直接沿用
                 if node.has_attr('data-trans-idx'):
                     idx = int(node['data-trans-idx'])
                 else:
-                    # 只有在没有编号时，才按顺序分配新编号
                     idx = start_global_idx + len(blocks)
                     node['data-trans-idx'] = str(idx)
                 
                 text, formats = self.extract_block_with_local_ids(node)
+                
+                # 终极净化：如果提取出的文本在去除所有锚点符号和空白后为空，则不提取
+                # Sequence A: 2A40-2AA3, Sequence B: 2B40-2BA3
+                clean_text = re.sub(r'[\u2A40-\u2AA3\u2B40-\u2BA3\s]', '', text)
+                if not clean_text:
+                    return
+
                 blocks.append({
                     'element': node,
                     'text': text,
                     'formats': formats,
-                    'size': size,
+                    'size': len(clean_text), # 使用实际文本长度
                     'global_idx': idx
                 })
 
@@ -168,61 +166,64 @@ class EPubAnchorProcessor:
             if not node or isinstance(node, str):
                 return
             
-            # 1. 如果是语义标签
-            if node.name in semantic_tags:
-                tag_and_add_block(node)
-                return
-
-            # 2. 如果是容器标签
+            # 1. 优先检查容器标签，决定是否拆解
             if node.name in container_tags:
                 total_size = get_text_size(node)
                 if total_size == 0:
                     return
 
+                # 是否包含可以继续拆分的子结构
                 has_child_structures = any(
                     child.name in semantic_tags or child.name in container_tags
                     for child in node.find_all(True, recursive=False)
                 )
 
+                # 如果内容很少或是叶子容器，则整体作为一个块
                 if total_size < COHESIVE_THRESHOLD or not has_child_structures:
                     tag_and_add_block(node)
                 else:
+                    # 递归拆解容器内容
                     for child in node.children:
-                        if isinstance(child, str):
-                            if child.strip():
-                                # 纯文本或混合内容：在 EPUB 中通常建议包裹在容器中
-                                pass
-                        else:
-                            process_node(child)
-            else:
-                if get_text_size(node) > 0:
-                    tag_and_add_block(node)
+                        process_node(child)
+                return
 
-        body = soup.find('body')
-        if body:
-            for child in body.children:
-                process_node(child)
+            # 2. 检查语义标签
+            if node.name in semantic_tags:
+                tag_and_add_block(node)
+                return
+
+            # 3. 处理既非容器也非语义的标签（可能是 span, b 等，如果它们出现在顶层）
+            if get_text_size(node) > 0:
+                tag_and_add_block(node)
+
+        if hasattr(soup, 'body') and soup.body:
+            root = soup.body
+        elif soup.name == '[document]':
+            root = soup
         else:
-            process_node(soup)
+            root = soup
+
+        for child in root.children:
+            process_node(child)
             
         return blocks
 
     def format_for_ai(self, group_blocks):
-        """将一组块格式化为 AI 提示格式，使用序列稀有字符"""
-        lines = [self.GS]
+        """将一组块格式化为 AI 提示格式"""
+        lines = []
         for i, block in enumerate(group_blocks):
             ds, de = self.get_block_delimiters(i)
+            # 每行一个块，便于 AI 识别
             lines.append(f"{ds}{block['text']}{de}")
-        lines.append(self.GE)
         return "\n".join(lines)
 
     def repair_translated_text(self, text):
         """
         修复翻译文本中的成对分隔符格式问题。
-        检测每个分隔符，确保成对出现。
+        检测每个分隔符 (Sequence A & B)，确保成对出现。
         """
-        # 新格式使用成对分隔符，修复逻辑：检查每个 BLOCK_DELIMS 字符是否成对
-        for delim in self.BLOCK_DELIMS:
+        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
+        for delim in all_delims:
             count = text.count(delim)
             if count % 2 == 1:
                 # 奇数个，说明缺少一个，在末尾补一个
@@ -230,44 +231,38 @@ class EPubAnchorProcessor:
         return text
 
     def check_anchor_format(self, text):
-        """
-        检测成对分隔符格式完整性。
-        检查项：每个分隔符字符必须成对出现（偶数个）。
-        """
-        for delim in self.BLOCK_DELIMS:
-            count = text.count(delim)
-            if count % 2 != 0:
+        """检测成对分隔符格式完整性"""
+        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
+        for delim in all_delims:
+            if text.count(delim) % 2 != 0:
                 return False
         return True
 
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """
-        [移除结构校验] 宽容解析。
-        auto_repair: 是否自动修复格式错误。
+        [扁平解析] 解析 AI 返回的多个块。
         """
         if auto_repair:
             response_text = self.repair_translated_text(response_text)
         
-        pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
-        group_match = re.search(pattern, response_text)
-        if group_match:
-            content = group_match.group(1).strip()
-        else:
-            content = response_text.strip()
+        content = response_text.strip()
             
         translated_texts = []
         last_pos = 0
         
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
+            # 注意：这里的正则围绕 Sequence A 字符包裹的内容
+            # 由于 Sequence A 只有一对字符，且每对唯一，使用非贪婪匹配
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content[last_pos:], re.DOTALL)
             
             if match:
-                block_text = match.group(1).strip()
-                translated_texts.append(block_text)
+                block_content = match.group(1).strip()
+                translated_texts.append(block_content)
                 last_pos += match.end()
             else:
+                # 容错：如果找不到该块，保留原文
                 translated_texts.append(original_group[i]['text'])
         
         return translated_texts, True
@@ -275,64 +270,63 @@ class EPubAnchorProcessor:
     def restore_html(self, original_block, translated_text, soup):
         """
         将翻译后的带锚点文本还原为 HTML 元素。
-        采用原处修改策略，锁定 original_block['element']。
+        采用递归策略处理嵌套的 Sequence B 分隔符。
         """
         element = original_block['element']
-        format_map = {int(re.search(r'(\d+)', f['id']).group(1)): f for f in original_block['formats']}
-        TS, TE = "⟦", "⟧"
+        format_map = {f['id']: f for f in original_block['formats']}
         
-        def parse_to_nodes(text):
+        # 识别所有 INNER_DELIMS 中的字符
+        delims_chars = "".join(self.INNER_DELIMS)
+        
+        def parse_recursive(text):
             nodes = []
             i = 0
             while i < len(text):
-                if text[i] == TS:
-                    start_idx = i
-                    level = 1
-                    j = i + 1
-                    while j < len(text) and level > 0:
-                        if text[j] == TS: level += 1
-                        elif text[j] == TE: level -= 1
-                        j += 1
-                    
-                    if level == 0:
-                        inner_text = text[start_idx+1:j-1]
-                        anchor_tail = text[j:]
-                        match = re.match(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), anchor_tail)
-                        if match:
-                            anchor_num = int(match.group(1))
-                            if anchor_num in format_map:
-                                fmt = format_map[anchor_num]
-                                new_tag = soup.new_tag(fmt['tag'])
-                                for k, v in fmt['attrs'].items():
-                                    new_tag[k] = v
-                                for child in parse_to_nodes(inner_text):
-                                    new_tag.append(child)
-                                nodes.append(new_tag)
-                                i = j + match.end()
-                                continue
-                
-                match_solo = re.match(re.escape(self.AS) + r'(\d+)' + re.escape(self.AE), text[i:])
-                if match_solo:
-                    anchor_num = int(match_solo.group(1))
-                    if anchor_num in format_map:
-                        fmt = format_map[anchor_num]
-                        if fmt.get('type') == 'monolithic':
-                            new_node = BeautifulSoup(fmt['raw_html'], 'html.parser').contents[0]
+                char = text[i]
+                if char in delims_chars and char in format_map:
+                    fmt = format_map[char]
+                    if fmt['type'] == 'monolithic':
+                        # 单体标签 (img, br 等)
+                        mono_soup = BeautifulSoup(fmt['raw_html'], 'html.parser')
+                        if mono_soup.contents:
                             import copy
-                            nodes.append(copy.copy(new_node))
-                        else:
+                            nodes.append(copy.copy(mono_soup.contents[0]))
+                        i += 1
+                    else:
+                        # 容器标签 (span, b, a 等)
+                        # 寻找匹配的闭合符号
+                        start_idx = i + 1
+                        balance = 1
+                        j = i + 1
+                        while j < len(text) and balance > 0:
+                            if text[j] == char:
+                                balance -= 1
+                            j += 1
+                        
+                        if balance == 0:
+                            # 找到匹配，递归处理内部内容
+                            inner_text = text[start_idx : j-1]
                             new_tag = soup.new_tag(fmt['tag'])
                             for k, v in fmt['attrs'].items():
                                 new_tag[k] = v
+                            
+                            for child_node in parse_recursive(inner_text):
+                                new_tag.append(child_node)
+                            
                             nodes.append(new_tag)
-                        i += match_solo.end()
-                        continue
-                
-                nodes.append(soup.new_string(text[i]))
-                i += 1
+                            i = j
+                        else:
+                            # 未找到闭合，当做普通文本处理 (防止崩溃)
+                            nodes.append(soup.new_string(char))
+                            i += 1
+                else:
+                    # 普通文本
+                    nodes.append(soup.new_string(char))
+                    i += 1
             return nodes
 
         def finalize_nodes(nodes):
+            """合并连续的文本节点"""
             if not nodes: return []
             result = []
             curr_str = ""
@@ -348,7 +342,7 @@ class EPubAnchorProcessor:
                 result.append(soup.new_string(curr_str))
             return result
 
-        new_nodes = finalize_nodes(parse_to_nodes(translated_text))
+        new_nodes = finalize_nodes(parse_recursive(translated_text))
         element.clear()
         for node in new_nodes:
             element.append(node)

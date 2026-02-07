@@ -15,21 +15,19 @@ class DocxAnchorProcessor:
         self.max_group_chars = max_group_chars
         self.temp_dir = None
         
-        # 稀有 Unicode 符号标记 (与 EPUB 保持一致)
-        self.GS = "⟬" # Group Start
-        self.GE = "⟭" # Group End
-        self.AS = "⦗" # Anchor Start
-        self.AE = "⦘" # Anchor End
-        
-        # 内部标签使用的括号
-        self.TS = "⟦" 
-        self.TE = "⟧"
-        
-        # 块级分隔符池
-        self.BLOCK_DELIMS = "⧖⧗⧘⧙⧚⧛⧜⧝⧞⧟⨀⨁⨂⨃⨄⨅⨆⨇⨈⨉⨊⨋⨌⨍⨎⨏⨐⨑⨒⨓⨔⨕⨖⨗⨘⨙⨚⨛⨜⨝⨞⨟"
+        # 组内块级分隔符池 (Sequence A: U+2A40 - U+2AA3)
+        self.BLOCK_DELIMS = "".join(chr(0x2A40 + i) for i in range(100))
+        # 块内标签分隔符池 (Sequence B: U+2B40 - U+2BA3)
+        self.INNER_DELIMS = "".join(chr(0x2B40 + i) for i in range(100))
 
     def get_block_delimiters(self, index):
+        """获取组内第 index 个块的分隔符 (Sequence A)"""
         char = self.BLOCK_DELIMS[index % len(self.BLOCK_DELIMS)]
+        return char, char
+
+    def get_inner_delimiters(self, index):
+        """获取块内第 index 个标签的分隔符 (Sequence B)"""
+        char = self.INNER_DELIMS[index % len(self.INNER_DELIMS)]
         return char, char
 
     def extract_docx(self, docx_path, callback=None):
@@ -61,22 +59,17 @@ class DocxAnchorProcessor:
 
     def extract_block_with_local_ids(self, element, include_nodes=False):
         """
-        核心逻辑：提取 DOCX 段落内容，将格式运行 <w:r> 转化为成对分隔符。
-        使用成对稀有字符 ⧖content⧖ 格式，字符本身即为唯一 ID。
+        核心逻辑：提取 DOCX 段落内容，将每个 <w:r> 转化为唯一的块内序列分隔符 (Sequence B)。
         """
         format_tags = []
-        local_counter = [0]  # 从 0 开始，用于索引 BLOCK_DELIMS
-
-        def get_delimiter(idx):
-            """获取第 idx 个分隔符"""
-            return self.BLOCK_DELIMS[idx % len(self.BLOCK_DELIMS)]
+        local_counter = [0]
 
         def recursive_extract(node):
-            if node.name == 't': # w:t 标签
+            if node.name == 't' or (hasattr(node, 'name') and node.name.endswith(':t')):
                 return node.get_text().replace('<', '&lt;').replace('>', '&gt;')
             
-            if node.name == 'r': # w:r 标签 (Run)
-                delim = get_delimiter(local_counter[0])
+            if node.name == 'r' or (hasattr(node, 'name') and node.name.endswith(':r')):
+                delim = self.get_inner_delimiters(local_counter[0])[0]
                 local_counter[0] += 1
                 
                 tag_info = {
@@ -85,18 +78,21 @@ class DocxAnchorProcessor:
                     'type': 'run'
                 }
                 if include_nodes:
-                    tag_info['node'] = node # 仅在还原阶段需要内存引用
+                    tag_info['node'] = node
                 format_tags.append(tag_info)
 
-                t_node = node.find('t', recursive=False)
-                if t_node:
-                    inner_text = t_node.get_text().replace('<', '&lt;').replace('>', '&gt;')
-                    # 成对分隔符包裹内容
-                    return f"{delim}{inner_text}{delim}"
+                # 提取 run 内部的所有文本节点
+                inner_texts = []
+                for child in node.find_all(['t', 'w:t'], recursive=False):
+                    inner_texts.append(child.get_text().replace('<', '&lt;').replace('>', '&gt;'))
+                
+                content = "".join(inner_texts)
+                if content:
+                    return f"{delim}{content}{delim}"
                 else:
                     return delim
                 
-            # 处理其他子节点 (如 w:p 中的特殊标签)
+            # 处理其他子节点 (如 w:p 中的特殊标签如 w:br, w:tab)
             child_parts = []
             if hasattr(node, 'children'):
                 for child in node.children:
@@ -118,7 +114,10 @@ class DocxAnchorProcessor:
         
         for p in paragraphs:
             text, formats = self.extract_block_with_local_ids(p, include_nodes=include_nodes)
-            if not text.strip():
+            
+            # 净化：去除锚点和空白后如果为空，则跳过
+            clean_text = re.sub(r'[\u2A40-\u2AA3\u2B40-\u2BA3\s]', '', text)
+            if not clean_text:
                 continue
             
             # 核心改进：ID-Aware 发现逻辑
@@ -132,131 +131,109 @@ class DocxAnchorProcessor:
                 'element': p,
                 'text': text,
                 'formats': formats,
-                'size': len(text),
+                'size': len(clean_text),
                 'global_idx': idx
             })
         return blocks
 
     def format_for_ai(self, group_blocks):
-        """同 EPUB"""
-        lines = [self.GS]
+        """将一组块格式化为 AI 提示格式"""
+        lines = []
         for i, block in enumerate(group_blocks):
             ds, de = self.get_block_delimiters(i)
+            # 每行一个块，便于 AI 识别
             lines.append(f"{ds}{block['text']}{de}")
-        lines.append(self.GE)
         return "\n".join(lines)
 
     def repair_translated_text(self, text):
         """
         修复翻译文本中的成对分隔符格式问题。
-        检测每个分隔符，确保成对出现。
+        检测每个分隔符 (Sequence A & B)，确保成对出现。
         """
-        for delim in self.BLOCK_DELIMS:
+        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
+        for delim in all_delims:
             count = text.count(delim)
             if count % 2 == 1:
+                # 奇数个，说明缺少一个，在末尾补一个
                 text = text + delim
         return text
 
     def check_anchor_format(self, text):
-        """
-        检测成对分隔符格式完整性。
-        检查项：每个分隔符字符必须成对出现（偶数个）。
-        """
-        for delim in self.BLOCK_DELIMS:
-            count = text.count(delim)
-            if count % 2 != 0:
+        """检测成对分隔符格式完整性"""
+        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
+        for delim in all_delims:
+            if text.count(delim) % 2 != 0:
                 return False
         return True
 
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """
-        [移除结构校验] 宽容解析。
-        auto_repair: 是否自动修复格式错误。
+        [扁平解析] 解析 AI 返回的多个块。
         """
         if auto_repair:
             response_text = self.repair_translated_text(response_text)
         
-        # 1. 尝试提取 ⟬ ⟭ 内部内容
-        pattern = re.escape(self.GS) + r'([\s\S]*)' + re.escape(self.GE)
-        group_match = re.search(pattern, response_text)
-        if group_match:
-            content = group_match.group(1).strip()
-        else:
-            content = response_text.strip()
+        content = response_text.strip()
             
         translated_texts = []
         last_pos = 0
         
-        # 2. 按顺序提取块
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
+            # 注意：这里的正则围绕 Sequence A 字符包裹的内容
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content[last_pos:], re.DOTALL)
             
             if match:
-                block_text = match.group(1).strip()
-                translated_texts.append(block_text)
+                block_content = match.group(1).strip()
+                translated_texts.append(block_content)
                 last_pos += match.end()
             else:
-                # 容错：追加原文保持对齐
+                # 容错：如果找不到该块，保留原文
                 translated_texts.append(original_group[i]['text'])
         
         return translated_texts, True
 
     def restore_xml(self, original_block, translated_text, soup):
         """
-        [最可靠方案] 手术式还原：直接修改 original_block['element'] 内部已有的 run 节点。
-        不再清空或重建 XML 树，只更新文本内容。
+        [手术式还原] 直接修改 original_block['element'] 内部已有的 run 节点。
         """
-        # 建立 ID 到原有 run 节点的映射
-        # original_block['formats'] 包含了提取时记录的节点引用
-        node_map = {}
-        for f in original_block['formats']:
-            num_match = re.search(r'(\d+)', f['id'])
-            if num_match:
-                node_map[int(num_match.group(1))] = f['node']
-
-        # 解析翻译后的文本，按顺序提取出每个锚点对应的文字
-        # 我们寻找 ⟦...⟧⦗n⦘ 结构
-        pattern = re.escape(self.TS) + r'(.*?)' + re.escape(self.TE) + re.escape(self.AS) + r'(\d+)' + re.escape(self.AE)
-        matches = list(re.finditer(pattern, translated_text))
+        node_map = {f['id']: f['node'] for f in original_block['formats']}
         
-        # 记录哪些节点已被更新，用于处理那些没有文字但有 ID 的节点（如 w:br）
-        updated_ids = set()
+        # 识别所有 INNER_DELIMS 中的字符
+        delims_chars = "".join(self.INNER_DELIMS)
         
-        for m in matches:
-            trans_inner = m.group(1)
-            node_id = int(m.group(2))
-            
-            if node_id in node_map:
-                run_node = node_map[node_id]
-                # 找到该 run 下的 w:t (或是 t)
-                t_node = run_node.find(['t', 'w:t'])
-                if t_node:
-                    t_node.string = trans_inner
+        # 解析翻译后的文本，寻找配对的 Sequence B 分隔符
+        i = 0
+        while i < len(translated_text):
+            char = translated_text[i]
+            if char in delims_chars and char in node_map:
+                # 寻找匹配的闭合符号
+                start_idx = i + 1
+                balance = 1
+                j = i + 1
+                while j < len(translated_text) and balance > 0:
+                    if translated_text[j] == char:
+                        balance -= 1
+                    j += 1
+                
+                if balance == 0:
+                    # 找到匹配，提取内部文本并更新节点
+                    inner_text = translated_text[start_idx : j-1]
+                    run_node = node_map[char]
+                    t_node = run_node.find(['t', 'w:t'])
+                    if t_node:
+                        t_node.string = inner_text
+                    else:
+                        new_t = soup.new_tag('w:t')
+                        new_t['xml:space'] = 'preserve'
+                        new_t.string = inner_text
+                        run_node.append(new_t)
+                    i = j
                 else:
-                    # 如果原本没有 t 节点但现在翻译出了文字，则创建一个
-                    new_t = soup.new_tag('w:t')
-                    new_t['xml:space'] = 'preserve'
-                    new_t.string = trans_inner
-                    run_node.append(new_t)
-                updated_ids.add(node_id)
-        
-        # 处理可能的“孤儿”锚点（即没有翻译出 ⟦⟧ 的锚点，或者纯 ID 锚点）
-        # 只要 ID 在翻译文本中出现，说明它被保留了
-        solo_pattern = re.escape(self.AS) + r'(\d+)' + re.escape(self.AE)
-        for m in re.finditer(solo_pattern, translated_text):
-            node_id = int(m.group(1))
-            if node_id not in updated_ids and node_id in node_map:
-                # 这种节点由于没有包围 ⟦⟧，意味着它是不可翻译节点（如 w:br）
-                # 只要它在译文中出现了，我们就保持其原本在 XML tree 中的位置
-                # 由于我们根本没有清空 original_block['element']，所以它本身就在那里
-                pass
-
-        # 这个方案最强大的一点在于：我们根本不需要做任何重建工作。
-        # original_block['element'] 是 BeautifulSoup 中原始 XML 树的一个节点。
-        # 我们在提取时记录了它的子节点引用，现在直接通过这些引用修改了它们的内容。
-        # 整个文档的结构、命名空间、段落属性完全没动。
+                    i += 1
+            else:
+                i += 1
 
     def repack_docx(self, output_path):
         """重新打包目录为 DOCX"""
