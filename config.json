@@ -1,0 +1,15 @@
+{
+    "history": [
+        {
+            "api_key": "sk-a4c5306606d3476d8022fac06c6602e3",
+            "api_url": "https://api.deepseek.com",
+            "model": "deepseek-chat",
+            "temp": 0.1,
+            "prompt": "你是专业翻译。将以下文本译为中文。\n规则：\n1. **行数一致**：输出的行数必须与输入的行数完全一致。\n2. **首尾配对**：每行必须以它原本的特殊起止符（如⩀...⩀）作为边界，严禁修改或遗漏。\n3. **行内对称**：保持标签符号（如⭀文字⭀）在块内的相对位置，且必须成对出现，仅翻译其中的文字。\n4. **结构锚点**：严禁删除或移动任何特殊符号，它们是还原排版的唯一依据。\n5. **简洁输出**：直接输出翻译内容，不要有任何额外解释。\n\n示例：\n⩀Hello⩀\n⩁The ⭀World⭀⩁\n->\n⩀你好⩀\n⩁这个⭀世界⭀⩁",
+            "chunk_size": 300,
+            "context_rounds": 1
+        }
+    ],
+    "cache_dir": "E:/Desktop/translat",
+    "output_dir": "E:/Desktop/translat"
+}
