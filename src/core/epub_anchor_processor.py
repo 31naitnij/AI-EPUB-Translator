@@ -220,27 +220,59 @@ class EPubAnchorProcessor:
     def repair_translated_text(self, text):
         """
         修复翻译文本中的成对分隔符格式问题。
-        检测每个分隔符 (Sequence A & B)，确保成对出现。
+        1. 确保每一行（由 Sequence A 定义）都有正确的起始和结束。
+        2. 确保行内锚点 (Sequence B) 成对出现。
         """
-        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
-        for delim in all_delims:
-            count = text.count(delim)
-            if count % 2 == 1:
-                # 奇数个，说明缺少一个，在末尾补一个
-                text = text + delim
-        return text
+        lines = text.split('\n')
+        repaired_lines = []
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 找到该行对应的 Sequence A 标识符
+            ds, de = self.get_block_delimiters(i)
+            
+            # 1. 修复行级锚点 (Sequence A)
+            if not line.startswith(ds):
+                line = ds + line
+            if not line.endswith(de):
+                line = line + de
+            
+            # 2. 修复行内锚点 (Sequence B) 对称性
+            for delim in self.INNER_DELIMS:
+                count = line.count(delim)
+                if count % 2 == 1:
+                    # 在末尾（行级锚点之前）补一个
+                    line = line[:-1] + delim + de
+            
+            repaired_lines.append(line)
+            
+        return "\n".join(repaired_lines)
 
     def check_anchor_format(self, text):
-        """检测成对分隔符格式完整性"""
-        all_delims = self.BLOCK_DELIMS + self.INNER_DELIMS
-        for delim in all_delims:
-            if text.count(delim) % 2 != 0:
+        """全面检测格式完整性"""
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line: continue
+            
+            ds, de = self.get_block_delimiters(i)
+            # 检查行首尾配对
+            if not (line.startswith(ds) and line.endswith(de)):
                 return False
+            
+            # 检查内部对称
+            for delim in self.INNER_DELIMS:
+                if line.count(delim) % 2 != 0:
+                    return False
         return True
 
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """
         [扁平解析] 解析 AI 返回的多个块。
+        增加行数一致性校验。
         """
         if auto_repair:
             response_text = self.repair_translated_text(response_text)
@@ -249,11 +281,11 @@ class EPubAnchorProcessor:
             
         translated_texts = []
         last_pos = 0
+        success = True
         
         for i in range(len(original_group)):
             ds, de = self.get_block_delimiters(i)
             # 注意：这里的正则围绕 Sequence A 字符包裹的内容
-            # 由于 Sequence A 只有一对字符，且每对唯一，使用非贪婪匹配
             block_pattern = re.escape(ds) + r'(.*?)' + re.escape(de)
             match = re.search(block_pattern, content[last_pos:], re.DOTALL)
             
@@ -262,10 +294,15 @@ class EPubAnchorProcessor:
                 translated_texts.append(block_content)
                 last_pos += match.end()
             else:
-                # 容错：如果找不到该块，保留原文
+                # 容错：如果找不到该块，标识失败并保留原文
                 translated_texts.append(original_group[i]['text'])
+                success = False
         
-        return translated_texts, True
+        # 严格检查：解析出的有效块数量必须等于请求的块数量
+        if len(translated_texts) != len(original_group):
+            success = False
+            
+        return translated_texts, success
 
     def restore_html(self, original_block, translated_text, soup):
         """
