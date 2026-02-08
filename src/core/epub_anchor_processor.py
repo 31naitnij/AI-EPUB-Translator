@@ -78,7 +78,7 @@ class EPubAnchorProcessor:
                         'raw_html': str(node),
                         'type': 'monolithic'
                     })
-                    return delim
+                    return f"{delim}{delim}"
                 
                 # 递归处理子节点
                 child_parts = []
@@ -107,7 +107,101 @@ class EPubAnchorProcessor:
 
             return ""
 
-        full_text = recursive_extract(element, is_root=True)
+        full_text = recursive_extract(element, is_root=True).strip()
+        
+        # --- 优化逻辑：折叠标签 (Tag Folding) ---
+        # 识别开头和结尾的锚点字符 (Sequence B) 以及包裹全文本的标签
+        folded_formats = []
+        delims_chars = "".join(self.INNER_DELIMS)
+        
+        changed = True
+        while changed:
+            changed = False
+            # 1. 检查开头和结尾的对称包裹标签
+            if len(full_text) >= 2:
+                if full_text[0] in delims_chars and full_text[0] == full_text[-1]:
+                    char = full_text[0]
+                    # 确保这个字符在内部没有出现过（即它确实是包裹性的）
+                    if full_text.count(char) == 2:
+                        # 找到对应的 tag_info
+                        tag_idx = -1
+                        for idx, fmt in enumerate(format_tags):
+                            if fmt['id'] == char and fmt.get('type') == 'container':
+                                tag_idx = idx
+                                break
+                        
+                            fmt = format_tags.pop(tag_idx)
+                            fmt['fold_type'] = 'wrap'
+                            folded_formats.append(fmt)
+                            full_text = full_text[1:-1].strip()
+                            changed = True
+                            continue
+
+            # 2. 检查开头的纯单点/空标签 (如空锚点)
+            if full_text and full_text[0] in delims_chars:
+                char = full_text[0]
+                tag_idx = -1
+                for idx, fmt in enumerate(format_tags):
+                    if fmt['id'] == char:
+                        tag_idx = idx
+                        break
+                
+                    # 单点字符可能是 monolithic 或者空 container
+                    # Monolithic 现在是 pair 形式，所以 count 应该是 2 (即使它没有 content)
+                    is_monolithic = (format_tags[tag_idx].get('type') == 'monolithic' and full_text.startswith(char + char))
+                    is_empty_container = (format_tags[tag_idx].get('type') == 'container' and full_text.count(char) == 1)
+                    
+                    if is_monolithic:
+                        fmt = format_tags.pop(tag_idx)
+                        fmt['fold_type'] = 'prefix'
+                        folded_formats.append(fmt)
+                        full_text = full_text[2:].strip()
+                        changed = True
+                        continue
+                    elif is_empty_container:
+                        fmt = format_tags.pop(tag_idx)
+                        fmt['fold_type'] = 'prefix'
+                        folded_formats.append(fmt)
+                        full_text = full_text[1:].strip()
+                        changed = True
+                        continue
+
+            # 3. 检查结尾的纯单点/空标签
+            if full_text and full_text[-1] in delims_chars:
+                char = full_text[-1]
+                tag_idx = -1
+                for idx, fmt in enumerate(format_tags):
+                    if fmt['id'] == char:
+                        tag_idx = idx
+                        break
+                
+                if tag_idx != -1:
+                    is_monolithic = (format_tags[tag_idx].get('type') == 'monolithic' and full_text.endswith(char + char))
+                    is_empty_container = (format_tags[tag_idx].get('type') == 'container' and full_text.count(char) == 1)
+                    
+                    if is_monolithic:
+                        fmt = format_tags.pop(tag_idx)
+                        fmt['fold_type'] = 'suffix'
+                        folded_formats.append(fmt)
+                        full_text = full_text[:-2].strip()
+                        changed = True
+                        continue
+                    elif is_empty_container:
+                        fmt = format_tags.pop(tag_idx)
+                        fmt['fold_type'] = 'suffix'
+                        folded_formats.append(fmt)
+                        full_text = full_text[:-1].strip()
+                        changed = True
+                        continue
+        
+        # 将折叠的标签合并到 formats 中，但标记为已合并
+        for fmt in folded_formats:
+            fmt['is_folded'] = True
+            format_tags.append(fmt)
+
+        # 终极净化：将内部所有空白字符集（换行、制表符、连续空格）合并为一个空格，模拟浏览器渲染效果
+        full_text = re.sub(r'\s+', ' ', full_text).strip()
+
         return full_text, format_tags
 
     def create_blocks_from_soup(self, soup, start_global_idx=0):
@@ -149,8 +243,8 @@ class EPubAnchorProcessor:
                 text, formats = self.extract_block_with_local_ids(node)
                 
                 # 终极净化：如果提取出的文本在去除所有锚点符号和空白后为空，则不提取
-                # Sequence A: 2A40-2AA3, Sequence B: 2B40-2BA3
-                clean_text = re.sub(r'[\u2A40-\u2AA3\u2B40-\u2BA3\s]', '', text)
+                # Sequence A: 2A40-2AA3, Sequence B: 2B40-2BA3, 加上 Unicode 空白 \u00A0
+                clean_text = re.sub(r'[\u2A40-\u2AA3\u2B40-\u2BA3\s\u00A0]', '', text)
                 if not clean_text:
                     return
 
@@ -310,7 +404,8 @@ class EPubAnchorProcessor:
         采用递归策略处理嵌套的 Sequence B 分隔符。
         """
         element = original_block['element']
-        format_map = {f['id']: f for f in original_block['formats']}
+        format_map = {f['id']: f for f in original_block['formats'] if not f.get('is_folded')}
+        folded_tags = [f for f in original_block['formats'] if f.get('is_folded')]
         
         # 识别所有 INNER_DELIMS 中的字符
         delims_chars = "".join(self.INNER_DELIMS)
@@ -328,7 +423,12 @@ class EPubAnchorProcessor:
                         if mono_soup.contents:
                             import copy
                             nodes.append(copy.copy(mono_soup.contents[0]))
-                        i += 1
+                        
+                        # 消耗掉成对的第二个字符 (如果是成对的话)
+                        if i + 1 < len(text) and text[i+1] == char:
+                            i += 2
+                        else:
+                            i += 1
                     else:
                         # 容器标签 (span, b, a 等)
                         # 寻找匹配的闭合符号
@@ -379,9 +479,51 @@ class EPubAnchorProcessor:
                 result.append(soup.new_string(curr_str))
             return result
 
-        new_nodes = finalize_nodes(parse_recursive(translated_text))
+        # 核心逻辑：应用折叠标签
+        # 1. 解析核心内容
+        core_nodes = finalize_nodes(parse_recursive(translated_text))
+        
+        # 2. 按顺序还原折叠标签 (实际上剥皮时是 LIFO，还原时倒序即为按照正确嵌套层级外包)
+        current_content = core_nodes
+        # folded_tags 列表中的顺序是发现顺序。由于我们是在 while True 中剥洋葱，
+        # 列表最后的标签是最先被剥离的（即最外层）。
+        # 但如果是 prefix/suffix, 剥离顺序决定了它们在 inner 之外的拓扑顺序。
+        # 倒序遍历可以确保最外层的 wrap 最后包，从而维持洋葱结构。
+        for fmt in reversed(folded_tags):
+            ftype = fmt.get('fold_type')
+            if ftype == 'wrap':
+                new_tag = soup.new_tag(fmt['tag'])
+                for k, v in fmt['attrs'].items(): new_tag[k] = v
+                for node in current_content:
+                    new_tag.append(node)
+                current_content = [new_tag]
+            elif ftype == 'prefix':
+                if fmt['type'] == 'monolithic':
+                    mono_soup = BeautifulSoup(fmt['raw_html'], 'html.parser')
+                    node = None
+                    if mono_soup.contents:
+                        import copy
+                        node = copy.copy(mono_soup.contents[0])
+                    if node: current_content = [node] + current_content
+                else:
+                    new_tag = soup.new_tag(fmt['tag'])
+                    for k, v in fmt['attrs'].items(): new_tag[k] = v
+                    current_content = [new_tag] + current_content
+            elif ftype == 'suffix':
+                if fmt['type'] == 'monolithic':
+                    mono_soup = BeautifulSoup(fmt['raw_html'], 'html.parser')
+                    node = None
+                    if mono_soup.contents:
+                        import copy
+                        node = copy.copy(mono_soup.contents[0])
+                    if node: current_content = current_content + [node]
+                else:
+                    new_tag = soup.new_tag(fmt['tag'])
+                    for k, v in fmt['attrs'].items(): new_tag[k] = v
+                    current_content = current_content + [new_tag]
+
         element.clear()
-        for node in new_nodes:
+        for node in current_content:
             element.append(node)
 
     def repack_epub(self, output_path):
