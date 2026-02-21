@@ -218,7 +218,7 @@ class MainWindow(QMainWindow):
         path_layout.addLayout(epub_layout)
 
         cache_layout = QHBoxLayout()
-        self.cache_path_edit = QLineEdit(r"E:\Downloads\transcache")
+        self.cache_path_edit = QLineEdit("cache")
         btn_browse_cache = QPushButton("选择文件夹")
         btn_browse_cache.clicked.connect(self.browse_cache)
         cache_layout.addWidget(QLabel("缓存目录:"))
@@ -227,7 +227,7 @@ class MainWindow(QMainWindow):
         path_layout.addLayout(cache_layout)
 
         output_layout = QHBoxLayout()
-        self.output_path_edit = QLineEdit(r"E:\Downloads\transoutput")
+        self.output_path_edit = QLineEdit("output")
         btn_browse_output = QPushButton("选择文件夹")
         btn_browse_output.clicked.connect(self.browse_output)
         output_layout.addWidget(QLabel("输出目录:"))
