@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QFileDialog, QSplitter, QProgressBar,
                              QMessageBox, QGroupBox, QSpinBox, QDoubleSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, 
-                             QAbstractItemView, QCheckBox, QPlainTextEdit)
+                             QAbstractItemView, QCheckBox, QPlainTextEdit, QApplication)
 from PySide6.QtCore import Qt, QThread, Signal, QCoreApplication, QRect, QSize
 from PySide6.QtGui import QFont, QIcon, QPainter, QColor, QTextFormat, QSyntaxHighlighter, QTextCharFormat
 import os
@@ -330,6 +330,20 @@ class MainWindow(QMainWindow):
         self.filter_combo.addItems(["全部", "已翻译", "未翻译", "有错误"])
         self.filter_combo.currentIndexChanged.connect(self.apply_table_filter)
         filter_layout.addWidget(self.filter_combo)
+        
+        filter_layout.addSpacing(15)
+        
+        filter_layout.addWidget(QLabel("搜索:"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("关键词...")
+        self.search_edit.textChanged.connect(self.apply_table_filter)
+        filter_layout.addWidget(self.search_edit, 1)
+        
+        self.search_type_combo = QComboBox()
+        self.search_type_combo.addItems(["全文搜索", "仅搜索原文", "仅搜索译文"])
+        self.search_type_combo.currentIndexChanged.connect(self.apply_table_filter)
+        filter_layout.addWidget(self.search_type_combo)
+        
         filter_layout.addStretch()
         group_layout.addLayout(filter_layout)
         
@@ -623,26 +637,43 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"已选择 {len(rows)} 个分组待翻译")
 
     def apply_table_filter(self):
-        """根据当前筛选器的选择显示或隐藏表格行"""
+        """根据当前筛选器和搜索框的选择显示或隐藏表格行"""
         if not hasattr(self, 'current_cache_data') or not self.current_cache_data:
             return
             
         filter_text = self.filter_combo.currentText()
+        search_kw = self.search_edit.text().strip().lower()
+        search_type = self.search_type_combo.currentText()
+        
         self.group_table.blockSignals(True)
         
         for row in range(self.group_table.rowCount()):
             f_idx, c_idx = self.flat_chunks[row]
             chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
             
-            is_visible = True
+            # --- 1. 状态筛选 ---
+            match_status = True
             if filter_text == "已翻译":
-                is_visible = bool(chunk.get("trans"))
+                match_status = bool(chunk.get("trans"))
             elif filter_text == "未翻译":
-                is_visible = not bool(chunk.get("trans"))
+                match_status = not bool(chunk.get("trans"))
             elif filter_text == "有错误":
-                is_visible = chunk.get("is_error", False)
+                match_status = chunk.get("is_error", False)
+            
+            # --- 2. 文本搜索 ---
+            match_search = True
+            if search_kw:
+                orig_text = chunk.get("orig", "").lower()
+                trans_text = chunk.get("trans", "").lower() or ""
                 
-            self.group_table.setRowHidden(row, not is_visible)
+                if search_type == "全文搜索":
+                    match_search = (search_kw in orig_text) or (search_kw in trans_text)
+                elif search_type == "仅搜索原文":
+                    match_search = (search_kw in orig_text)
+                elif search_type == "仅搜索译文":
+                    match_search = (search_kw in trans_text)
+                
+            self.group_table.setRowHidden(row, not (match_status and match_search))
             
         self.group_table.blockSignals(False)
             
@@ -1062,7 +1093,7 @@ class MainWindow(QMainWindow):
             
 
 if __name__ == "__main__":
-    app = sys.modules.get('PySide6.QtWidgets').QApplication(sys.argv)
+    app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

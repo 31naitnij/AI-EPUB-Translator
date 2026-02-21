@@ -3,7 +3,7 @@ import re
 import zipfile
 import shutil
 import tempfile
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Comment
 
 class EPubAnchorProcessor:
     """
@@ -389,19 +389,13 @@ class EPubAnchorProcessor:
             if not node:
                 return
             
-            # 0. Handle Text Nodes (often dropped in previous version)
-            if isinstance(node, str):
-                if node.strip():
-                   # Wrap in a temporary span-like structure or just process it?
-                   # Since tag_and_add_block expects an element with attributes, 
-                   # we might need to wrap it if it's raw text.
-                   # However, BS4 NavigableString doesn't have attrs.
-                   # Let's wrap it in a dummy tag to consistent processing.
-                   new_span = soup.new_tag("span")
-                   new_span.string = node
-                   # Check size
-                   if get_text_size(new_span) > 0:
-                       tag_and_add_block(new_span)
+            if isinstance(node, NavigableString):
+                if not isinstance(node, Comment) and node.strip():
+                    # 固化：将原本浮于树外的文本节点永久包裹为 span
+                    # 确保 data-trans-idx 属性可以被保存在 HTML 镜像中，回填时能被正确定位
+                    new_span = soup.new_tag("span")
+                    node.wrap(new_span)
+                    tag_and_add_block(new_span)
                 return
             
             # 1. 优先检查容器标签，决定是否拆解
@@ -421,7 +415,7 @@ class EPubAnchorProcessor:
                     tag_and_add_block(node)
                 else:
                     # 递归拆解容器内容
-                    for child in node.children:
+                    for child in list(node.children):
                         process_node(child)
                 return
 
@@ -441,7 +435,7 @@ class EPubAnchorProcessor:
         else:
             root = soup
 
-        for child in root.children:
+        for child in list(root.children):
             process_node(child)
             
         return blocks
@@ -550,10 +544,10 @@ class EPubAnchorProcessor:
                 start_tag += ">"
                 end_tag = f"</{fmt['tag']}>"
                 
-                # 双向替换锚点
+                # 双向替换锚点 - 增强容错：如果锚点不是成对出现，则干脆不还原该标签，将其视为普通文本处理（稍后统一清理）
                 parts = current_html.split(delim)
-                if len(parts) >= 3:
-                    # 假设 AI 保留了成对的锚点
+                if len(parts) >= 3 and len(parts) % 2 != 0:
+                    # 只有在成对（分割后为奇数个部分）时才进行标签还原
                     new_parts = [parts[0]]
                     for i in range(1, len(parts) - 1, 2):
                         new_parts.append(start_tag)
@@ -561,6 +555,12 @@ class EPubAnchorProcessor:
                         new_parts.append(end_tag)
                         new_parts.append(parts[i+1])
                     current_html = "".join(new_parts)
+                else:
+                    # 如果不成对，保留原文（不处理 delim），稍后由正则统一清理
+                    pass
+
+        # 终极清理：清理可能残留的任何内部锚点占位符 (如 ((A)))，确保不出现在电子书中
+        current_html = re.sub(r'\(\([A-Z0-9]+\)\)', '', current_html)
 
         # 2. 应用折叠标签 (按洋葱模型在外周还原, 即逆序还原)
         import copy

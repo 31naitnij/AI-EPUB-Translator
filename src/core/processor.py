@@ -290,8 +290,14 @@ class Processor:
                     chunk["is_error"] = False 
                     # Only apply to mirror if valid!
                     self.apply_chunk_to_mirror(input_path, cached_data, i)
+                elif error_type.startswith("unbalanced_internal_"):
+                    # 容错：如果是内部锚点不平衡，虽然标记为 error 供 UI 显示，
+                    # 但仍然允许 apply_chunk_to_mirror (它会回退到纯文本模式)
+                    chunk["is_error"] = True
+                    self.apply_chunk_to_mirror(input_path, cached_data, i)
                 else:
                     chunk["is_error"] = True # Flag as error for UI
+                    # 对于 Line Mismatch 或 Delimiter Mismatch，由于无法定位块，坚决不回写
                     # Do NOT apply to mirror
                 
                 # Save Chunk (Atomic file per chunk, safe)
@@ -349,9 +355,9 @@ class Processor:
         chunk = cached_data["files"][f_idx]["chunks"][c_idx]
         if not chunk["trans"]: return
         
-        # Double check validity before applying (even if called manually)
-        if chunk.get("is_error", False):
-            return # Skip invalid chunks
+        # 实时将翻译块回写到 source/ 镜像中
+        # 注意：即便 chunk["is_error"] 为 True (比如内部锚点不平衡)，
+        # 只要行边界对应，我们仍然尝试回写 (epub_anchor_processor 会处理降级)
         
         # 确定受影响的文件
         block_to_file = cached_data.get("block_to_file", {})
