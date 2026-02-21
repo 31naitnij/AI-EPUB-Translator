@@ -6,13 +6,7 @@ echo.
 echo [2/3] 正在生成单文件可执行程序 (EXE)...
 echo 这可能需要几分钟时间，请稍候...
 
-pyinstaller --onefile ^
-            --noconsole ^
-            --name "AI_EPUB_Translator" ^
-            --collect-all markdown ^
-            --collect-all lxml ^
-            --clean ^
-            main.py
+python build.py
 
 echo.
 echo [3/3] 构建完成！
