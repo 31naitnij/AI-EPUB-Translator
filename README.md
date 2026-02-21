@@ -28,6 +28,11 @@ git pull origin master
 ```
 完成同步后，直接运行 `run.bat` 即可享受最新更新。
 
+#### 自行构建 (可选)
+如果您希望生成一个独立的可执行文件：
+- **Windows**: 运行 **`build_exe.bat`**。
+- 生成的文件将位于 `dist/EPUB_Translator.exe`。
+
 ---
 
 ### 2. 使用说明
