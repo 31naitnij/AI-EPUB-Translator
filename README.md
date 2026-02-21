@@ -4,17 +4,29 @@
 
 ---
 
-### 1. 获取与运行方法
+### 1. 获取与运行方法 (推荐)
 
-您可以通过以下几种方式使用本工具：
+本项目推荐通过 Git 直接获取源码运行，以便随时同步最新的功能修复。
 
-*   **下载使用（推荐）**：在 GitHub 的 `Release` 页面下载最新版的 **`AI_EPUB_Translator.exe`**，双击即可直接运行，无需安装环境。
-*   **一键运行**：下载源码压缩包并解压，双击 **`run.bat`** (Windows) 或运行 **`run.sh`** (macOS/Linux)，程序会自动创建虚拟环境并安装所有依赖。
-*   **源码运行**：
-    1.  确保已安装 Python 3.10+。
-    2.  执行 `pip install -r requirements.txt`。
-    3.  执行 `python main.py` 启动。
-*   **自行构建**：运行 `python build.py` 即可在 `dist` 目录下生成属于您自己的可执行文件。
+#### 首次安装
+1. **克隆仓库**：
+   ```bash
+   git clone https://github.com/31naitnij/AI-EPUB-Translator.git
+   cd AI-EPUB-Translator
+   ```
+2. **一键启动**：
+   - **Windows**: 双击运行 **`run.bat`**
+   - **macOS / Linux**: 在终端执行 **`./run.sh`**
+
+> [!NOTE]
+> `run.bat` 会自动检测并为您创建 Python 虚拟环境 (`.venv`) 并安装所有必需依赖，无需手动操作。
+
+#### 同步更新
+若要获取修复或新功能（如：搜索框、回填容错增强），只需在文件夹内运行：
+```bash
+git pull origin master
+```
+完成同步后，直接运行 `run.bat` 即可享受最新更新。
 
 ---
 
