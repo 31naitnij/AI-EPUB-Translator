@@ -4,34 +4,28 @@
 
 ---
 
-### 1. 获取与运行方法 (推荐)
+### 1. 获取与运行方法
 
-本项目推荐通过 Git 直接获取源码运行，以便随时同步最新的功能修复。
+#### 方式 A：直接使用 (推荐)
+1. **下载安装包**：前往 GitHub 的 [Releases](https://github.com/31naitnij/AI-EPUB-Translator/releases) 页面。
+2. **下载 `AI_EPUB_Translator_vX.Y.Z.zip`** 并解压。
+3. **运行程序**：双击运行生成的 **`EPUB_Translator.exe`** 即可，无需安装 Python 环境。
 
-#### 首次安装
+#### 方式 B：从源码拉取 (适合开发者/同步更新)
 1. **克隆仓库**：
    ```bash
    git clone https://github.com/31naitnij/AI-EPUB-Translator.git
    cd AI-EPUB-Translator
    ```
-2. **一键启动**：
-   - **Windows**: 双击运行 **`run.bat`**
-   - **macOS / Linux**: 在终端执行 **`./run.sh`**
+2. **一键启动**：双击 **`run.bat`** (Windows) 或执行 **`./run.sh`** (macOS)。
+3. **同步最新修复**：
+   ```bash
+   git pull origin master
+   ```
 
-> [!NOTE]
-> `run.bat` 会自动检测并为您创建 Python 虚拟环境 (`.venv`) 并安装所有必需依赖，无需手动操作。
-
-#### 同步更新
-若要获取修复或新功能（如：搜索框、回填容错增强），只需在文件夹内运行：
-```bash
-git pull origin master
-```
-完成同步后，直接运行 `run.bat` 即可享受最新更新。
-
-#### 自行构建 (可选)
-如果您希望生成一个独立的可执行文件：
-- **Windows**: 运行 **`build_exe.bat`**。
-- 生成的文件将位于 `dist/EPUB_Translator.exe`。
+#### 方式 C：自行构建 (可选)
+1. 确保安装了 Python 环境。
+2. 运行 **`build_exe.bat`**，生成的文件位于 `dist/EPUB_Translator.exe`。
 
 ---
 
