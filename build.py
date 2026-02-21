@@ -12,23 +12,15 @@ def build():
         "--onefile",
         "--windowed",  # No console
         "--name=EPUB_Translator",
+        "--clean",
         "--collect-all=markdown",
         "--collect-all=lxml",
+        "--collect-all=ebooklib",
+        "--collect-all=PySide6",
         # Add src to search path
         "--paths=src",
-        # CRITICAL: Force include ALL modules explicitly
+        # Force include src modules
         "--hidden-import=src",
-        "--hidden-import=src.config",
-        "--hidden-import=src.core",
-        "--hidden-import=src.core.config_manager",
-        "--hidden-import=src.core.epub_anchor_processor",
-        "--hidden-import=src.core.processor",
-        "--hidden-import=src.core.translator",
-        "--hidden-import=src.ui",
-        "--hidden-import=src.ui.main_window",
-        "--hidden-import=src.ui.settings_widget",
-        "--hidden-import=src.ui.file_widget",
-        "--hidden-import=src.ui.monitor_widget",
         "main.py"
     ]
     
