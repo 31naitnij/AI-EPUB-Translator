@@ -8,12 +8,13 @@
 
 您可以通过以下几种方式使用本工具：
 
-*   **下载使用**：在 GitHub 的 `Release` 页面下载最新压缩包，解压后双击运行。
+*   **下载使用（推荐）**：在 GitHub 的 `Release` 页面下载最新版的 **`AI_EPUB_Translator.exe`**，双击即可直接运行，无需安装环境。
+*   **一键运行**：下载源码压缩包并解压，双击 **`run.bat`** (Windows) 或运行 **`run.sh`** (macOS/Linux)，程序会自动创建虚拟环境并安装所有依赖。
 *   **源码运行**：
-    1.  确保电脑已安装 Python 3.10 或更高版本。
-    2.  在终端执行 `pip install -r requirements.txt` 安装依赖。
-    3.  执行 `python main.py` 启动程序。
-*   **自行构建**：如果您需要将其打包为独立的可执行文件，可以运行脚本 `build_exe.bat` (Windows) 或 `build_macos.sh` (macOS)。
+    1.  确保已安装 Python 3.10+。
+    2.  执行 `pip install -r requirements.txt`。
+    3.  执行 `python main.py` 启动。
+*   **自行构建**：运行 `python build.py` 即可在 `dist` 目录下生成属于您自己的可执行文件。
 
 ---
 
