@@ -5,7 +5,6 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from src.core.epub_anchor_processor import EPubAnchorProcessor
-from src.core.docx_anchor_processor import DocxAnchorProcessor
 from bs4 import BeautifulSoup
 
 class Processor:
@@ -15,7 +14,6 @@ class Processor:
             os.makedirs(cache_dir)
         self.status = "idle" # idle, running, stopped
         self.epub_anchor_processor = EPubAnchorProcessor()
-        self.docx_anchor_processor = DocxAnchorProcessor()
         self.lock = threading.Lock()
 
     def save_cache(self, input_path, cached_data):
@@ -98,15 +96,10 @@ class Processor:
         source_dir = os.path.join(cache_dir, "source")
         if not os.path.exists(source_dir):
             if callback: callback(f"正在建立永久源码镜像: {source_dir}")
-            if processor_type == "epub":
-                self.epub_anchor_processor.extract_epub(input_path, callback=callback)
-                # 将临时目录移动到 source_dir
-                shutil.move(self.epub_anchor_processor.temp_dir, source_dir)
-                self.epub_anchor_processor.temp_dir = source_dir
-            else:
-                self.docx_anchor_processor.extract_docx(input_path, callback=callback)
-                shutil.move(self.docx_anchor_processor.temp_dir, source_dir)
-                self.docx_anchor_processor.temp_dir = source_dir
+            self.epub_anchor_processor.extract_epub(input_path, callback=callback)
+            # 将临时目录移动到 source_dir
+            shutil.move(self.epub_anchor_processor.temp_dir, source_dir)
+            self.epub_anchor_processor.temp_dir = source_dir
         return source_dir
 
     def save_metadata(self, input_path, data):
@@ -247,90 +240,13 @@ class Processor:
         self.save_metadata(input_path, cached_data)
         return cached_data
 
-    def process_docx_anchor_init(self, input_path, max_chars, only_load=False, callback=None):
-        cached_data = self.load_metadata(input_path)
-        if cached_data and cached_data.get("source_type") == "docx_anchor":
-            return self.load_cache(input_path, callback=callback)
-        if only_load: return None
-
-        # 使用永久镜像目录
-        temp_dir = self.ensure_source_mirror(input_path, "docx", callback=callback)
-        self.docx_anchor_processor.temp_dir = temp_dir
-        
-        xml_files = self.docx_anchor_processor.get_xml_files()
-        total_files = len(xml_files)
-        all_blocks = []
-        files_info = []
-        
-        for idx, xml_file in enumerate(xml_files):
-            if callback: callback(f"正在解析文件: {idx+1}/{total_files} ({os.path.basename(xml_file)})")
-            rel_path = os.path.relpath(xml_file, temp_dir)
-            with open(xml_file, 'r', encoding='utf-8') as f:
-                soup = BeautifulSoup(f, 'xml')
-            
-            # 核心改进：打标并分配全局索引
-            file_blocks = self.docx_anchor_processor.create_blocks_from_soup(soup, start_global_idx=len(all_blocks))
-            if not file_blocks: continue
-            
-            # 保存带标签的源码到镜像
-            with open(xml_file, 'wb') as f:
-                f.write(soup.encode())
-                
-            start_idx = len(all_blocks)
-            all_blocks.extend(file_blocks)
-            files_info.append({
-                "rel_path": rel_path,
-                "block_range": [start_idx, len(all_blocks)],
-                "finished": False
-            })
-
-        groups = []
-        current_group = []
-        current_size = 0
-        for i, block in enumerate(all_blocks):
-            if current_size + block['size'] > max_chars and current_group:
-                groups.append(current_group)
-                current_group = []
-                current_size = 0
-            current_group.append(i)
-            current_size += block['size']
-        if current_group: groups.append(current_group)
-
-        chunks = []
-        for i, g_indices in enumerate(groups):
-            group_blocks = [all_blocks[idx] for idx in g_indices]
-            chunk = {
-                "orig": self.docx_anchor_processor.format_for_ai(group_blocks),
-                "trans": "",
-                "block_indices": g_indices,
-                "is_error": False
-            }
-            chunks.append(chunk)
-            self.save_chunk(input_path, i, chunk)
-
-        cached_data = {
-            "source_type": "docx_anchor",
-            "working_dir": temp_dir,
-            "input_path": input_path,
-            "input_ext": ".docx",
-            "current_flat_idx": 0,
-            "files": [{"rel_path": "all_groups", "chunks": chunks, "finished": False}],
-            "all_blocks": [{"text": b['text'], "formats": b['formats'], "parent_idx": b.get('parent_idx'), "segment_idx": b.get('segment_idx')} for b in all_blocks],
-            "finished": False,
-            "block_to_file": {b_idx: f_info['rel_path'] for f_info in files_info for b_idx in range(*f_info['block_range'])}
-        }
-        self.save_metadata(input_path, cached_data)
-        return cached_data
+        # [REMOVED process_docx_anchor_init]
 
     def check_chunk_format(self, input_path, text, expected_count, source_type=None):
         """
         根据源文件类型检查格式完整性。
         """
-        ext = os.path.splitext(input_path)[1].lower()
-        if ext == ".docx":
-            return self.docx_anchor_processor.check_anchor_format(text, expected_count)
-        else:
-            return self.epub_anchor_processor.check_anchor_format(text, expected_count)
+        return self.epub_anchor_processor.check_anchor_format(text, expected_count)
 
 
 
@@ -413,11 +329,7 @@ class Processor:
 
 
     def finalize_translation(self, input_path, output_path, target_format=None):
-        ext = os.path.splitext(input_path)[1].lower()
-        if ext == ".docx":
-            return self.finalize_docx_anchor_translation(input_path, output_path)
-        else:
-            return self.finalize_epub_anchor_translation(input_path, output_path)
+        return self.finalize_epub_anchor_translation(input_path, output_path)
 
     def apply_chunk_to_mirror(self, input_path, cached_data, chunk_idx):
         """
@@ -458,7 +370,7 @@ class Processor:
         if source_type == "epub_anchor":
             trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
         else:
-            trans_texts, ok = self.docx_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
+            return # Only EPUB supported
             
         if not ok: return
         
@@ -483,35 +395,6 @@ class Processor:
                 
                 with open(abs_path, 'wb') as f:
                     f.write(soup.encode(formatter='html'))
-            else:
-                with open(abs_path, 'r', encoding='utf-8') as f:
-                    soup = BeautifulSoup(f, 'xml')
-                # 此时 create_blocks_from_soup 会进行 normalize_paragraph_breaks
-                soup_blocks = self.docx_anchor_processor.create_blocks_from_soup(soup, include_nodes=True)
-                
-                # 建立 parent_idx -> list of segments 映射
-                block_map = {}
-                for b in soup_blocks:
-                    pid = b.get('parent_idx')
-                    if pid not in block_map: block_map[pid] = []
-                    block_map[pid].append(b)
-                
-                for b_idx, text in zip(orig_indices, trans_texts):
-                    if block_to_file.get(str(b_idx)) == rel_path:
-                        # 从 all_blocks 获取元数据
-                        meta = cached_data["all_blocks"][b_idx]
-                        pid = meta.get('parent_idx')
-                        sid = meta.get('segment_idx')
-                        
-                        target_segments = block_map.get(pid, [])
-                        # 查找匹配 segment_idx 的 block
-                        target_b = next((tb for tb in target_segments if tb['segment_idx'] == sid), None)
-                        
-                        if target_b:
-                            self.docx_anchor_processor.restore_xml(target_b, text, soup)
-                
-                with open(abs_path, 'wb') as f:
-                    f.write(soup.encode())
 
     def finalize_epub_anchor_translation(self, input_path, output_path):
         # 极简模式：直接打包镜像，因为 apply_chunk_to_mirror 已经实时更新了它
@@ -519,9 +402,3 @@ class Processor:
         self.epub_anchor_processor.temp_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
         self.epub_anchor_processor.repack_epub(output_path)
         return f"Successfully exported to EPUB via Live Synchronization: {output_path}"
-
-    def finalize_docx_anchor_translation(self, input_path, output_path):
-        self.ensure_source_mirror(input_path, "docx")
-        self.docx_anchor_processor.temp_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
-        self.docx_anchor_processor.repack_docx(output_path)
-        return f"Successfully exported to DOCX via Live Synchronization: {output_path}"
