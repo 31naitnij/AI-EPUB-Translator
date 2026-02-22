@@ -1,31 +1,32 @@
 import sys
 import subprocess
+import os
 
 def build():
     """
-    Build the EPUB Translator using PyInstaller.
-    This uses explicit --hidden-import for ALL modules to ensure they're bundled.
+    Build the EPUB Translator using PyInstaller and the .spec file.
+    The .spec file contains all optimized configurations.
     """
+    spec_file = "EPUB_Translator.spec"
+    
+    if not os.path.exists(spec_file):
+        print(f"Error: {spec_file} not found.")
+        return
+
     command = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
-        "--onefile",
-        "--windowed",  # No console
-        "--name=EPUB_Translator",
         "--clean",
-        "--collect-all=markdown",
-        "--collect-all=lxml",
-        "--collect-all=ebooklib",
-        "--collect-all=PySide6",
-        # Add src to search path
-        "--paths=src",
-        # Force include src modules
-        "--hidden-import=src",
-        "main.py"
+        spec_file
     ]
     
     print("Building with command:", " ".join(command))
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, check=True)
+        print("\n[SUCCESS] Build completed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"\n[ERROR] Build failed with exit code {e.returncode}")
+        sys.exit(e.returncode)
 
 if __name__ == "__main__":
     build()
