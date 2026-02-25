@@ -7,7 +7,7 @@
 ### 1. 获取与运行方法
 
 #### 方式 1：Windows 直接运行 (推荐)
-1. **下载release安装包**：前往 GitHub [Releases](https://github.com/31naitnij/AI-EPUB-Translator/releases) 页面。
+1. **下载release压缩包**：前往 GitHub [Releases](https://github.com/31naitnij/AI-EPUB-Translator/releases) 页面。
 2. **解压缩并运行**
 
 #### 方式 2：自行构建 (适用于开发者)
