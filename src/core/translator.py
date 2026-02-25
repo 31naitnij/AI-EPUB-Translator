@@ -9,60 +9,59 @@ class Translator:
         self.system_prompt = system_prompt
         self.timeout = float(timeout)
 
-    def translate_chunk(self, current_text):
+    def translate_chunk(self, current_text, stream_callback=None):
         messages = [
             {"role": "system", "content": self.system_prompt}
         ]
         
-        # Removed multi-turn dialogue context (history)
-        
         # Append Stop Symbol to user content
         messages.append({"role": "user", "content": f"{current_text}⏹️"})
         
-        try:
-            try:
-                # 1. Try Doubao-style nested object (Standard for newer models)
+        def do_request(extra_body=None):
+            if stream_callback:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    stream=True,
+                    stop=["⏹️"],
+                    extra_body=extra_body
+                )
+                full_content = ""
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content if chunk.choices else ""
+                    if delta:
+                        full_content += delta
+                        stream_callback(full_content)
+                return full_content
+            else:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=self.temperature,
                     stream=False,
                     stop=["⏹️"],
-                    extra_body={
-                        "thinking": {"type": "disabled"}
-                    }
+                    extra_body=extra_body
                 )
+                return response.choices[0].message.content
+
+        try:
+            try:
+                # 1. Try Doubao-style nested object
+                return do_request(extra_body={"thinking": {"type": "disabled"}})
             except Exception as e1:
                 # 2. Try string style as fallback
-                if "400" in str(e1) or "BadRequest" in str(e1) or "InvalidParameter" in str(e1):
+                if any(x in str(e1) for x in ["400", "BadRequest", "InvalidParameter"]):
                     try:
-                        response = self.client.chat.completions.create(
-                            model=self.model,
-                            messages=messages,
-                            temperature=self.temperature,
-                            stream=False,
-                            stop=["⏹️"],
-                            extra_body={
-                                "thinking": "disabled"
-                            }
-                        )
+                        return do_request(extra_body={"thinking": "disabled"})
                     except Exception as e2:
                         # 3. Final fallback: retry without thinking parameter
-                        if "400" in str(e2) or "BadRequest" in str(e2) or "InvalidParameter" in str(e2):
-                            response = self.client.chat.completions.create(
-                                model=self.model,
-                                messages=messages,
-                                temperature=self.temperature,
-                                stream=False,
-                                stop=["⏹️"]
-                            )
+                        if any(x in str(e2) for x in ["400", "BadRequest", "InvalidParameter"]):
+                            return do_request(extra_body=None)
                         else:
                             raise e2
                 else:
                     raise e1
-
-            # Non-streaming return
-            return response.choices[0].message.content
         except Exception as e:
             print(f"翻译出错: {e}")
             return f"[翻译错误: {e}]"

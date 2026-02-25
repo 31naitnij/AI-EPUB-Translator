@@ -20,45 +20,70 @@ class SymbolHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.block_format = QTextCharFormat()
-        self.block_format.setForeground(QColor("#0055ff")) # 蓝色
+        self.block_format.setForeground(QColor("#008800")) # 绿色
         self.block_format.setFontWeight(QFont.Bold)
 
-        self.anchor_format = QTextCharFormat()
-        self.anchor_format.setForeground(QColor("#008800")) # 绿色
-        self.anchor_format.setFontWeight(QFont.Bold)
+        self.inline_format = QTextCharFormat()
+        self.inline_format.setForeground(QColor("#b8860b")) # 金黄色/暗黄
+        self.inline_format.setFontWeight(QFont.Bold)
+
+        self.self_closing_format = QTextCharFormat()
+        self.self_closing_format.setForeground(QColor("#0055ff")) # 蓝色
+        self.self_closing_format.setFontWeight(QFont.Bold)
 
         self.error_format = QTextCharFormat()
         self.error_format.setBackground(QColor("#ffcccc")) # 浅红背景
         self.error_format.setUnderlineStyle(QTextCharFormat.SpellCheckUnderline)
         self.error_format.setUnderlineColor(QColor("red"))
+        
+        # 用于校验的参考标签集 (全文本范围)
+        self.ref_tags = set()
+        # 是否开启严格校验模式 (通常用于待翻译区)
+        self.is_strict = False
 
     def highlightBlock(self, text):
-        # 1. 高亮 [[n]] 块标记，并检查对称性（每行应恰好有一对）
-        blocks = re.findall(r'\[\[\d+\]\]', text)
-        block_counts = {}
-        for b in blocks:
-            block_counts[b] = block_counts.get(b, 0) + 1
-
-        for match in re.finditer(r'\[\[\d+\]\]', text):
+        # 匹配所有可能的简化标签格式
+        
+        # 1. 块级标签 <n>, </n>
+        # 使用绿色高亮
+        for match in re.finditer(r'</?\d+>', text):
             tag = match.group()
-            if block_counts[tag] != 2:
+            is_valid = True
+            if self.is_strict:
+                if tag not in self.ref_tags:
+                    is_valid = False
+            
+            if not is_valid:
                 self.setFormat(match.start(), match.end() - match.start(), self.error_format)
             else:
                 self.setFormat(match.start(), match.end() - match.start(), self.block_format)
 
-        # 2. 高亮 ((A)) 锚点标记，并检查对称性（每行应成对出现）
-        anchors = re.findall(r'\(\([A-Z0-9]+\)\)', text)
-        anchor_counts = {}
-        for a in anchors:
-            anchor_counts[a] = anchor_counts.get(a, 0) + 1
-
-        for match in re.finditer(r'\(\([A-Z0-9]+\)\)', text):
+        # 2. 行内标签 <tn>, </tn>
+        # 支持多位数 ID
+        for match in re.finditer(r'</?t\d+>', text):
             tag = match.group()
-            if anchor_counts[tag] % 2 != 0:
-                # 不对称，显示错误高亮
+            is_valid = True
+            if self.is_strict:
+                if tag not in self.ref_tags:
+                    is_valid = False
+            
+            if not is_valid:
                 self.setFormat(match.start(), match.end() - match.start(), self.error_format)
             else:
-                self.setFormat(match.start(), match.end() - match.start(), self.anchor_format)
+                self.setFormat(match.start(), match.end() - match.start(), self.inline_format)
+
+        # 3. 自闭合标签 <sn/>
+        for match in re.finditer(r'<s\d+/>', text):
+            tag = match.group()
+            is_valid = True
+            if self.is_strict:
+                if tag not in self.ref_tags:
+                    is_valid = False
+            
+            if not is_valid:
+                self.setFormat(match.start(), match.end() - match.start(), self.error_format)
+            else:
+                self.setFormat(match.start(), match.end() - match.start(), self.self_closing_format)
 
 class TranslationWorker(QThread):
     progress = Signal(int, int, str, str, bool, str) # current_idx, total, orig, trans, is_finished, error_type
@@ -272,10 +297,11 @@ class MainWindow(QMainWindow):
         row1.addWidget(QLabel("并发:"))
         row1.addWidget(self.concurrency_spin, 1)
 
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(0, 5000)
-        self.interval_spin.setValue(0)
-        self.interval_spin.setSuffix("ms")
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0.0, 60.0)
+        self.interval_spin.setSingleStep(0.1)
+        self.interval_spin.setValue(0.0)
+        self.interval_spin.setSuffix("s")
         row1.addWidget(QLabel("间隔:"))
         row1.addWidget(self.interval_spin, 1)
 
@@ -385,6 +411,10 @@ class MainWindow(QMainWindow):
         self.editor_splitter.addWidget(self.orig_text_edit)
         self.editor_splitter.addWidget(self.trans_text_edit)
         
+        # 设置校验模式
+        self.trans_highlighter.is_strict = True
+        self.trans_text_edit.textChanged.connect(self.on_trans_changed_highlight)
+
         editor_layout.addWidget(self.editor_splitter, 1)
         
         self.btn_save_edit = QPushButton("保存组修改")
@@ -514,7 +544,7 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setPlainText(s.get('prompt') or DEFAULT_PROMPT)
         self.chunk_size_spin.setValue(s['chunk_size'])
         self.concurrency_spin.setValue(s.get('max_workers', 1))
-        self.interval_spin.setValue(s.get('interval', 0))
+        self.interval_spin.setValue(s.get('interval', 0.0))
         self.timeout_spin.setValue(s.get('timeout', 60))
 
     def get_current_settings(self):
@@ -557,16 +587,22 @@ class MainWindow(QMainWindow):
             ext = os.path.splitext(file_path)[1].lower()
             if ext == ".epub":
                 self.current_mode = "epub_anchor"
-                cache_data = self.processor.process_epub_anchor_init(
-                    file_path, settings['chunk_size'], only_load=autoload, callback=self.update_status
-                )
+                # 改进的缓存加载逻辑：优先尝试加载
+                cache_data = self.processor.load_cache(file_path, callback=self.update_status)
+                
+                if cache_data is None:
+                    if autoload: return False
+                    self.update_status("未发现现有缓存，正在进行首次分析...")
+                    cache_data = self.processor.process_epub_anchor_init(
+                        file_path, settings['chunk_size'], callback=self.update_status
+                    )
+                else:
+                    self.update_status("已成功加载现有翻译缓存。")
             else:
                 self.update_status(f"错误: 不支持的文件格式: {ext} (仅支持 .epub)")
                 return False
             
             if cache_data is None:
-                if autoload: return False
-                # Should have been handled by processor raising error or returning None if logic failed
                 return False
 
             self.flat_chunks = []
@@ -582,12 +618,12 @@ class MainWindow(QMainWindow):
                     # ID
                     self.group_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
                     # Status
-                    status_str = "已翻译" if c_data["trans"] else "未翻译"
+                    status_str = "已翻译" if c_data.get("trans") else "未翻译"
                     status_item = QTableWidgetItem(status_str)
                     self.group_table.setItem(row, 1, status_item)
                     
                     # Preview
-                    preview = c_data["orig"][:50].replace("\n", " ") + "..."
+                    preview = c_data.get("orig", "")[:50].replace("\n", " ") + "..."
                     preview_item = QTableWidgetItem(preview)
                     self.group_table.setItem(row, 2, preview_item)
                     
@@ -712,11 +748,23 @@ class MainWindow(QMainWindow):
         
         if cache_data and ch_idx < len(cache_data["files"]):
             chunk = cache_data["files"][ch_idx]["chunks"][ck_idx]
-            self.orig_text_edit.setPlainText(chunk["orig"])
-            self.trans_text_edit.setPlainText(chunk["trans"])
+            
+            # 视觉上保留 <n> 标记，并应用绿色高亮
+            self.orig_text_edit.setPlainText(chunk.get("orig", ""))
+            self.trans_text_edit.setPlainText(chunk.get("trans", ""))
+            
+            # 手动更新一次参考标签集
+            orig_tags = set(re.findall(r'</?\d+>|</?t\d+>|<s\d+/>', chunk.get("orig", "")))
+            self.trans_highlighter.ref_tags = orig_tags
+            self.trans_highlighter.rehighlight()
+            
             self.current_indices = (ch_idx, ck_idx)
             self.current_flat_idx_view = flat_idx # track which row is in editor
             self.status_label.setText(f"查看：ID {flat_idx + 1}")
+
+    def on_trans_changed_highlight(self):
+        # 实时同步原文中的标签作为校验参考 (可选，通常原文不动)
+        pass
 
     def translate_selected_chunk(self):
         # Translate ALL selected rows
@@ -741,8 +789,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'flat_chunks') and hasattr(self, 'current_cache_data'):
             f_idx, c_idx = self.flat_chunks[first_row]
             chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
-            self.orig_text_edit.setPlainText(chunk["orig"])
-            self.trans_text_edit.setPlainText(chunk["trans"] or "")
+            self.orig_text_edit.setPlainText(chunk.get("orig", ""))
+            self.trans_text_edit.setPlainText(chunk.get("trans", ""))
 
         settings = self.get_current_settings()
         translator = Translator(
@@ -830,81 +878,73 @@ class MainWindow(QMainWindow):
             self.status_label.setText("正在等待当前段落完成并保存后停止...")
 
     def on_progress(self, current_idx, total, orig, trans, is_finished, error_type="ok"):
-        # 1. Update In-Memory Cache (Critical for Review) - ALWAYS update cache
+        # 严格非流式：忽略所有中间状态
+        if not is_finished:
+            self.status_label.setText(f"正在进行进度统计: {current_idx + 1}/{total}")
+            return
+
         if hasattr(self, 'flat_chunks') and hasattr(self, 'current_cache_data'):
             f_idx, c_idx = self.flat_chunks[current_idx]
             if self.current_cache_data:
                 chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
                 chunk["trans"] = trans
-                # 只有在 chunk 完成时才更新错误类型，流式过程中保持原本状态或默认 ok
-                if is_finished:
-                    chunk["error_type"] = error_type
-                    chunk["is_error"] = (error_type != "ok")
+                chunk["error_type"] = error_type
+                chunk["is_error"] = (error_type != "ok")
+                
+                # 更新表格状态和背景色
+                self.group_table.blockSignals(True)
+                status_item = self.group_table.item(current_idx, 1)
+                if status_item:
+                     status_item.setText("已翻译" if not chunk["is_error"] else "格式错误")
+                
+                bg_color = QColor("#ffaaaa") if chunk["is_error"] else QColor("#ffffff")
+                for col in range(3):
+                    cell = self.group_table.item(current_idx, col)
+                    if cell: cell.setBackground(bg_color)
+                self.group_table.blockSignals(False)
         
-        # 2. 实时跟随：只要开始翻译或更新，就选中该行
-        cur_row = self.group_table.currentRow()
-        if cur_row != current_idx:
-            # 立即选中当前正在处理的行，消除“停留在上一行”的延迟感
+        # 跟随逻辑：仅在任务完成时选中该行并更新编辑器
+        if self.group_table.currentRow() != current_idx:
+            self.group_table.blockSignals(True)
             self.group_table.selectRow(current_idx)
-        else:
-            # 如果当前行已经被选中（例如第一个），则手动刷新编辑器内容
-            self.load_group_into_editor(current_idx)
+            self.group_table.blockSignals(False)
+            # 同步
+            self.current_flat_idx_view = current_idx
+            self.current_indices = (f_idx, c_idx)
+            if self.orig_text_edit: self.orig_text_edit.setPlainText(chunk.get("orig", ""))
+            
+        if self.trans_text_edit: 
+            self.trans_text_edit.setPlainText(trans)
 
-        # 3. 进度条与状态栏反馈
+        # 实时显示禁用 (已按要求改为非流式)
+        pass
+
+        # 4. 进度条与状态栏反馈
+        task_status = ""
         if hasattr(self, 'current_task_indices') and self.current_task_indices:
-            # 如果是局部翻译，进度基于选中块
             try:
                 task_pos = self.current_task_indices.index(current_idx) + (1 if is_finished else 0.5)
                 self.progress_bar.setValue(int(task_pos))
-                task_status = f"翻译选定块: {self.current_task_indices.index(current_idx)+1}/{len(self.current_task_indices)}"
-            except ValueError:
-                task_status = f"进度: {current_idx+1}/{total}"
-        else:
-            # 全量翻译
+                task_status = f"翻译选中: {self.current_task_indices.index(current_idx)+1}/{len(self.current_task_indices)}"
+            except ValueError: pass
+        
+        if not task_status:
             self.progress_bar.setMaximum(total)
             self.progress_bar.setValue(current_idx + (1 if is_finished else 0))
-            task_status = f"全局进度: {current_idx+1}/{total}"
+            task_status = f"全量进度: {current_idx+1}/{total}"
 
+        # 处理状态栏节流显示 (流式)
         now = time.time()
-        # 处理编辑器实时显示 (流式)
         if not is_finished:
-            if now - self._last_ui_update > 0.05: # 减少节流，提升平滑度
-                self.status_label.setText(f"{task_status} (流式传输中...)")
-                
-                # 更新编辑器内容
-                if self.group_table.currentRow() == current_idx:
-                    self.orig_text_edit.setPlainText(orig)
-                    self.trans_text_edit.setPlainText(trans)
-                
-                self._last_ui_update = now
+            self.status_label.setText(f"{task_status} (翻译中...)")
             return
+        else:
+            self.status_label.setText(f"{task_status} (块 ID:{current_idx+1} 已完成)")
+            self.apply_table_filter()
 
-        # 当一个 chunk 完成时，更新列表状态
-        if current_idx < self.group_table.rowCount():
-            status_item = self.group_table.item(current_idx, 1)
-            if status_item:
-                f_idx, c_idx = self.flat_chunks[current_idx]
-                chunk = self.current_cache_data["files"][f_idx]["chunks"][c_idx]
-                
-                status_item.setText("已翻译")
-                
-                # 颜色逻辑：统一使用红色标注所有错误
-                if chunk.get("is_error", False):
-                     bg_color = QColor("#ffaaaa") # Red for all errors
-                else:
-                     bg_color = Qt.transparent
-                     
-                for col in range(self.group_table.columnCount()):
-                    self.group_table.item(current_idx, col).setBackground(bg_color)
-        
-        
-        # 4. 根据当前筛选状态更新可见性
-        self.apply_table_filter()
-        self.status_label.setText(f"{task_status} (当前块已保存)")
-
-    def save_manual_edit(self):
+    def save_manual_edit(self, is_manual=True):
         if not self.processor or not self.current_cache_data:
-            QMessageBox.warning(self, "警告", "没有加载的文件或缓存。")
+            if is_manual: QMessageBox.warning(self, "警告", "没有加载的文件或缓存。")
             return
             
         file_path = self.epub_path_edit.text()
@@ -918,53 +958,41 @@ class MainWindow(QMainWindow):
             # Update table UI
             if hasattr(self, 'current_flat_idx_view'):
                 row = self.current_flat_idx_view
-                self.group_table.item(row, 1).setText("已翻译")
-                for col in range(self.group_table.columnCount()):
-                    self.group_table.item(row, col).setBackground(Qt.transparent)
+                item = self.group_table.item(row, 1)
+                if item: item.setText("已翻译")
             
-            # --- CRITICAL FIX START ---
             # 2. Persist to Disk (Individual Chunk)
             flat_idx = self.current_flat_idx_view
             chunk_data = self.current_cache_data["files"][ch_idx]["chunks"][ck_idx]
             
-            # 2.1 Re-validate format on manual save
+            # 2.1 Re-validate format 
             error_type = self.processor.check_chunk_format(file_path, trans_text, expected_count=len(chunk_data.get("block_indices", [])))
             chunk_data["error_type"] = error_type
-            if error_type == "ok":
-                chunk_data["is_error"] = False
-                # Apply to mirror if valid
-                try:
-                    self.processor.save_chunk(file_path, flat_idx, chunk_data)
+            chunk_data["is_error"] = (error_type != "ok")
+            
+            try:
+                self.processor.save_chunk(file_path, flat_idx, chunk_data)
+                
+                if not chunk_data["is_error"]:
                     self.processor.apply_chunk_to_mirror(file_path, self.current_cache_data, flat_idx)
-                    self.status_label.setText(f"修改已保存至磁盘并更新导出镜像 (ID: {flat_idx+1})")
-                    
-                    # Update UI color
-                    for col in range(self.group_table.columnCount()):
-                        self.group_table.item(row, col).setBackground(Qt.transparent)
-                        
-                except Exception as e:
-                    QMessageBox.critical(self, "错误", f"保存失败: {e}")
-                    return
-            else:
-                chunk_data["is_error"] = True
-                self.processor.save_chunk(file_path, flat_idx, chunk_data) # Save even if invalid
-                
-                # 颜色逻辑：统一使用红色标注所有错误
-                if chunk_data.get("is_error", False):
-                    bg_color = QColor("#ffaaaa") # Red for all errors
-                else:
                     bg_color = Qt.transparent
-                
-                self.status_label.setText(f"修改已保存 (ID: {flat_idx+1})")
-                if chunk_data.get("is_error", False):
-                    self.status_label.setText(f"修改已保存，但检测到格式错误 (ID: {flat_idx+1})")
-                    QMessageBox.warning(self, "格式警告", "检测到格式错误（行数或锚点不一致）。\n该组已变红，且暂时不会用于生成最终文档。")
+                    if is_manual: self.status_label.setText(f"修改已保存至磁盘并更新镜像 (ID: {flat_idx+1})")
+                else:
+                    bg_color = QColor("#ffaaaa")
+                    if is_manual:
+                        self.status_label.setText(f"修改已保存，但检测到格式错误 (ID: {flat_idx+1})")
+                        QMessageBox.warning(self, "格式警告", "检测到格式错误（行数或锚点不一致）。\n该组已变红，且暂时不会用于生成最终文档。")
                 
                 # Update UI color
-                for col in range(self.group_table.columnCount()):
-                    self.group_table.item(row, col).setBackground(bg_color)
+                if hasattr(self, 'current_flat_idx_view'):
+                    row = self.current_flat_idx_view
+                    for col in range(self.group_table.columnCount()):
+                        item = self.group_table.item(row, col)
+                        if item: item.setBackground(bg_color)
                 
-                self.apply_table_filter() # Re-apply filter after manual edit
+            except Exception as e:
+                if is_manual: QMessageBox.critical(self, "错误", f"保存失败: {e}")
+                return
 
 
 
@@ -1039,7 +1067,8 @@ class MainWindow(QMainWindow):
              pass
         
         if complete:
-            self.save_manual_edit()
+            # 移除这里的 save_manual_edit()，因为 process_run 已经自动处理了保存和镜像同步
+            # 这能避免在任务结束时误触发格式警告弹窗
             if self.worker and hasattr(self.worker, 'target_indices') and self.worker.target_indices:
                 self.status_label.setText(f"选中块翻译完成。")
             else:

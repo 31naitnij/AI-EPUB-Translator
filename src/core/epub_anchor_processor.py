@@ -22,19 +22,14 @@ class EPubAnchorProcessor:
         self.INNER_DELIMS = "".join(chr(0x2B40 + i) for i in range(100))
 
     def get_block_delimiters(self, index):
-        """获取组内第 index 个块的分隔符 (使用 [[n]] 格式)"""
-        tag = f"[[{index+1}]]"
-        return tag, tag
+        """获取组内第 index 个块的分隔符 (使用 <n></n> 格式)"""
+        return f"<{index+1}>", f"</{index+1}>"
 
-    def get_inner_delimiters(self, index):
-        """获取块内第 index 个标签的分隔符 (使用 ((A)) 格式)"""
-        res = ""
-        temp = index
-        while temp >= 0:
-            res = chr(65 + (temp % 26)) + res
-            temp = (temp // 26) - 1
-        tag = f"(({res}))"
-        return tag, tag
+    def get_inner_delimiters(self, index, is_self_closing=False):
+        """获取块内第 index 个标签的分隔符 (使用 <tn></tn> 或 <sn/> 格式)"""
+        if is_self_closing:
+            return f"<s{index+1}/>", f"<s{index+1}/>"
+        return f"<t{index+1}>", f"</t{index+1}>"
 
     def extract_epub(self, epub_path, callback=None):
         """将 EPUB 完整解压到临时目录"""
@@ -58,75 +53,24 @@ class EPubAnchorProcessor:
                     content_files.append(os.path.join(root, file))
         return content_files
 
-    def extract_block_with_local_ids(self, element):
+    def extract_block_with_local_ids(self, element, current_tag_idx=0):
         """
-        核心逻辑：提取块内容。
-        1. Tag Folding：折叠完整包裹或边缘的空标签。
-        2. Internal Anchors：将其余内部标签转化为 ⟬n⟭ 锚点。
+        核心逻辑：提取块内容并分配标签 ID。
+        使用简化标签策略：标签 ID 在当前请求中累加。
         """
-        content = element.decode_contents().strip()
-        format_tags = [] # 存储所有格式信息（折叠标签 + 内部锚点）
-        
-        while True:
-            temp_soup = BeautifulSoup(content, 'html.parser')
-            all_nodes = [c for c in temp_soup.contents if not (isinstance(c, str) and not c.strip())]
-            
-            if not all_nodes:
-                break
-                
-            changed = False
-            # Prefix Folding
-            first = all_nodes[0]
-            if hasattr(first, 'name') and not first.get_text(strip=True) and not first.find_all(True):
-                format_tags.append({
-                    'tag': first.name,
-                    'attrs': dict(first.attrs),
-                    'is_folded': True,
-                    'fold_type': 'prefix'
-                })
-                del all_nodes[0]
-                content = "".join(str(n) for n in all_nodes)
-                changed = True
-            # Suffix Folding
-            elif hasattr(all_nodes[-1], 'name') and not all_nodes[-1].get_text(strip=True) and not all_nodes[-1].find_all(True):
-                last = all_nodes[-1]
-                format_tags.append({
-                    'tag': last.name,
-                    'attrs': dict(last.attrs),
-                    'is_folded': True,
-                    'fold_type': 'suffix'
-                })
-                del all_nodes[-1]
-                content = "".join(str(n) for n in all_nodes)
-                changed = True
-            # Wrapping Folding
-            elif len(all_nodes) == 1 and all_nodes[0].name:
-                tag = all_nodes[0]
-                format_tags.append({
-                    'tag': tag.name,
-                    'attrs': dict(tag.attrs),
-                    'is_folded': True,
-                    'fold_type': 'wrap'
-                })
-                content = tag.decode_contents().strip()
-                changed = True
-                
-            if not changed:
-                break
-
-        # 接下来处理内部锚点 (⟬n⟭)
-        temp_soup = BeautifulSoup(content, 'html.parser')
-        local_counter = [0]
+        format_tags = [] 
+        tag_counter = [current_tag_idx]
         monolithic_tags = ['math', 'svg', 'canvas', 'video', 'audio', 'img', 'br', 'hr']
 
         def recursive_extract(node):
             if isinstance(node, str):
+                # 预清理文本中的 HTML 特殊字符，但保留空白，统一在最后处理
                 return node.replace('<', '&lt;').replace('>', '&gt;')
             
             if hasattr(node, 'name') and node.name:
                 if node.name in monolithic_tags:
-                    delim = self.get_inner_delimiters(local_counter[0])[0]
-                    local_counter[0] += 1
+                    delim, _ = self.get_inner_delimiters(tag_counter[0], is_self_closing=True)
+                    tag_counter[0] += 1
                     format_tags.append({
                         'id': delim,
                         'tag': node.name,
@@ -135,7 +79,7 @@ class EPubAnchorProcessor:
                         'type': 'monolithic',
                         'is_internal': True
                     })
-                    return f"{delim}{delim}"
+                    return delim
                 
                 # 容器标签
                 child_parts = []
@@ -143,27 +87,30 @@ class EPubAnchorProcessor:
                     child_parts.append(recursive_extract(child))
                 
                 inner_text = "".join(child_parts)
-                delim = self.get_inner_delimiters(local_counter[0])[0]
-                local_counter[0] += 1
+                start_delim, end_delim = self.get_inner_delimiters(tag_counter[0])
+                tag_counter[0] += 1
                 
                 format_tags.append({
-                    'id': delim,
+                    'id': start_delim,
                     'tag': node.name,
                     'attrs': dict(node.attrs),
                     'type': 'container',
                     'is_internal': True
                 })
-                return f"{delim}{inner_text}{delim}"
+                return f"{start_delim}{inner_text}{end_delim}"
             return ""
 
         final_parts = []
-        for child in temp_soup.contents:
+        for child in element.children:
             final_parts.append(recursive_extract(child))
             
         full_text = "".join(final_parts)
+        
+        # 终极净化：强制将所有连续的空白字符（包括换行）压缩为单个空格
+        # 这确保了标签和文本之间紧密相连，不会出现“标签单独占一行”
         full_text = re.sub(r'\s+', ' ', full_text).strip()
         
-        return full_text, format_tags
+        return full_text, format_tags, tag_counter[0]
 
     def extract_block_with_local_ids_legacy(self, element):
         """
@@ -336,8 +283,8 @@ class EPubAnchorProcessor:
     def create_blocks_from_soup(self, soup, start_global_idx=0):
         """
         从 BeautifulSoup 对象中识别翻译块。
-        添加强制打标逻辑：给每个块添加 data-trans-idx 属性。
         """
+        current_tag_idx = [0]
         blocks = []
         semantic_tags = {
             'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
@@ -348,8 +295,8 @@ class EPubAnchorProcessor:
             'blockquote', 'thead', 'tbody', 'tfoot', 'dl', 'ol', 'ul', 'nav', 'li'
         }
         
-        # 降阈值，强制拆分容器标签为更小的语义块
-        COHESIVE_THRESHOLD = 1 
+        # 低阈值，强制拆分容器标签为更细粒度的语义块，以匹配渲染行数
+        COHESIVE_THRESHOLD = 10 
 
         def get_text_size(node):
             if not node: return 0
@@ -369,7 +316,8 @@ class EPubAnchorProcessor:
                     idx = start_global_idx + len(blocks)
                     node['data-trans-idx'] = str(idx)
                 
-                text, formats = self.extract_block_with_local_ids(node)
+                text, formats, next_tag_idx = self.extract_block_with_local_ids(node, current_tag_idx[0])
+                current_tag_idx[0] = next_tag_idx
                 
                 # 终极净化：如果提取出的文本在去除所有锚点符号和空白后为空，则不提取
                 # [[ ]] and (( )) are ASCII, no need for special range here unless we want to be specific
@@ -391,40 +339,33 @@ class EPubAnchorProcessor:
             
             if isinstance(node, NavigableString):
                 if not isinstance(node, Comment) and node.strip():
-                    # 固化：将原本浮于树外的文本节点永久包裹为 span
-                    # 确保 data-trans-idx 属性可以被保存在 HTML 镜像中，回填时能被正确定位
                     new_span = soup.new_tag("span")
                     node.wrap(new_span)
                     tag_and_add_block(new_span)
                 return
             
-            # 1. 优先检查容器标签，决定是否拆解
-            if node.name in container_tags:
+            # 核心改进：深度优先判断是否应该打散块
+            # 规则：如果一个节点（无论是容器还是语义标签）包含了其他块级元素，则继续拆解
+            has_block_children = any(
+                child.name in semantic_tags or child.name in container_tags
+                for child in node.find_all(True, recursive=False)
+            )
+
+            if node.name in semantic_tags or node.name in container_tags:
                 total_size = get_text_size(node)
                 if total_size == 0:
                     return
 
-                # 是否包含可以继续拆分的子结构
-                has_child_structures = any(
-                    child.name in semantic_tags or child.name in container_tags
-                    for child in node.find_all(True, recursive=False)
-                )
-
-                # 如果内容很少或是叶子容器，则整体作为一个块
-                if total_size < COHESIVE_THRESHOLD or not has_child_structures:
-                    tag_and_add_block(node)
-                else:
-                    # 递归拆解容器内容
+                # 如果它包含更深层的块结构，且内容超过最小内聚阈值，则拆解
+                if has_block_children and total_size > COHESIVE_THRESHOLD:
                     for child in list(node.children):
                         process_node(child)
+                else:
+                    # 叶子语义块或微小结构，整体作为一个翻译单元
+                    tag_and_add_block(node)
                 return
 
-            # 2. 检查语义标签
-            if node.name in semantic_tags:
-                tag_and_add_block(node)
-                return
-
-            # 3. 处理既非容器也非语义的标签（可能是 span, b 等，如果它们出现在顶层）
+            # 处理既非容器也非语义的标签（可能是顶层的 span, b 等，虽然少见）
             if get_text_size(node) > 0:
                 tag_and_add_block(node)
 
@@ -454,137 +395,144 @@ class EPubAnchorProcessor:
     def check_anchor_format(self, text, expected_count):
         """
         全面检测格式完整性:
-        1. 检查每行 [[n]] 边界。
-        2. 检查内部 ((A)) 是否成对。
+        1. 检查 <n>...</n> 边界。
+        2. 检查内部 <tn>...</tn> 是否成对。
         """
-        lines = text.strip().split('\n')
-        valid_lines = [l for l in lines if l.strip()]
+        content = text.strip()
         
-        if len(valid_lines) != expected_count:
+        # 查找所有 <n>...</n> 块
+        # 使用 DOTALL 允许跨行
+        blocks = re.findall(r'<(\d+)>(.*?)</\1>', content, re.DOTALL)
+        
+        if len(blocks) != expected_count:
             return "line_count_mismatch"
 
-        for i, line in enumerate(valid_lines):
-            line = line.strip()
-            ds, de = self.get_block_delimiters(i)
-            if not (line.startswith(ds) and line.endswith(de)):
-                return "delimiter_mismatch"
+        for i, (idx_str, block_content) in enumerate(blocks):
+            # 块索引校验
+            if int(idx_str) != i + 1:
+                return f"index_mismatch_at_{idx_str}_expected_{i+1}"
             
-            # 内部锚点平衡性检查
-            internal_anchors = re.findall(r'\(\([A-Z0-9]+\)\)', line)
-            for anchor in set(internal_anchors):
-                if line.count(anchor) % 2 != 0:
-                    return f"unbalanced_internal_{anchor}"
+            # 内部容器标签平衡性检查 <t1>...</t1>
+            container_anchors = re.findall(r'<t(\d+)>', block_content)
+            for anchor_idx in set(container_anchors):
+                start_tag = f"<t{anchor_idx}>"
+                end_tag = f"</t{anchor_idx}>"
+                if block_content.count(start_tag) != block_content.count(end_tag):
+                    return f"unbalanced_internal_t{anchor_idx}"
             
         return "ok"
 
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """
-        [扁平解析] 解析 AI 返回的多个块。
-        增加行数一致性校验。
+        容错解析 AI 响应：
+        1. 使用 ID 驱动映射 (<n>...</n>)。
+        2. 如果某个 ID 缺失，使用原文回填。
+        3. 只要提取到一个有效的块，就认为 success=True。
         """
         content = response_text.strip()
-            
+        expected_len = len(original_group)
+        
+        # 提取所有有效的 <n>...</n> 块
+        pattern = r'<(\d+)>(.*?)</\1>'
+        matches = list(re.finditer(pattern, content, re.DOTALL))
+        
+        found_blocks = {}
+        for m in matches:
+            b_id = int(m.group(1))
+            b_content = m.group(2).strip()
+            # 记录第一个出现的 ID（防止 AI 重复输出同名块）
+            if b_id not in found_blocks:
+                found_blocks[b_id] = b_content
+                
         translated_texts = []
-        last_pos = 0
-        success = True
+        any_found = False
         
-        for i in range(len(original_group)):
-            ds, de = self.get_block_delimiters(i)
-            # 匹配 [[n]]...[[n]] 格式，n 可能为多位数
-            # 需要转义方括号
-            ds_esc = re.escape(ds)
-            de_esc = re.escape(de)
-            block_pattern = ds_esc + r'(.*?)' + de_esc
-            match = re.search(block_pattern, content[last_pos:], re.DOTALL)
-            
-            if match:
-                block_content = match.group(1).strip()
-                translated_texts.append(block_content)
-                last_pos += match.end()
+        for i in range(expected_len):
+            expected_id = i + 1
+            if expected_id in found_blocks:
+                translated_texts.append(found_blocks[expected_id])
+                any_found = True
             else:
-                # 容错：如果找不到该块，标识失败并保留原文
+                # 缺失块：回退到原文
                 translated_texts.append(original_group[i]['text'])
-                success = False
-        
-        # 严格检查：解析出的有效块数量必须等于请求的块数量
-        if len(translated_texts) != len(original_group):
-            success = False
-            
-        return translated_texts, success
+                
+        return translated_texts, any_found
 
     def restore_html(self, original_block, translated_text, soup):
         """
-        将翻译后的带 ⟬n⟭ 锚点的文本还原为 HTML 元素。
-        1. 还原块内 ⟬n⟭ 锚点。
-        2. 应用折叠的标签 (Folding Tags)。
+        将翻译后的文本还原为 HTML。
+        容错规则：
+        1. 仅还原存在于 original_block['formats'] 中的 ID。
+        2. 若有错误/未知标签则忽略。
+        3. 自动闭合翻译中未闭合的标签，确保 HTML 结构安全。
         """
-        element = original_block['element']
-        format_tags = original_block.get('formats', [])
-        
-        # 分离折叠标签和内部锚点
-        internal_anchors = [f for f in format_tags if f.get('is_internal')]
-        folded_tags = [f for f in format_tags if f.get('is_folded')]
-        
-        # 1. 还原内部锚点 (⟬n⟭)
         current_html = translated_text
-        # 按 ID 长度降序替换，防止 ⟬10⟭ 匹配到 ⟬1⟭
-        internal_anchors.sort(key=lambda x: len(x['id']), reverse=True)
+        formats = original_block.get('formats', [])
+        format_map = {f['id']: f for f in formats}
         
-        for fmt in internal_anchors:
-            delim = fmt['id']
-            if fmt['type'] == 'monolithic':
-                # 单体标签还原
-                current_html = current_html.replace(f"{delim}{delim}", fmt['raw_html'])
-            else:
-                # 容器标签还原
-                start_tag = f"<{fmt['tag']}"
-                for k, v in fmt['attrs'].items():
-                    if isinstance(v, list): v = " ".join(v)
-                    start_tag += f' {k}="{v}"'
-                start_tag += ">"
-                end_tag = f"</{fmt['tag']}>"
-                
-                # 双向替换锚点 - 增强容错：如果锚点不是成对出现，则干脆不还原该标签，将其视为普通文本处理（稍后统一清理）
-                parts = current_html.split(delim)
-                if len(parts) >= 3 and len(parts) % 2 != 0:
-                    # 只有在成对（分割后为奇数个部分）时才进行标签还原
-                    new_parts = [parts[0]]
-                    for i in range(1, len(parts) - 1, 2):
-                        new_parts.append(start_tag)
-                        new_parts.append(parts[i])
-                        new_parts.append(end_tag)
-                        new_parts.append(parts[i+1])
-                    current_html = "".join(new_parts)
-                else:
-                    # 如果不成对，保留原文（不处理 delim），稍后由正则统一清理
-                    pass
+        # 记录已打开的标签，用于尾部自动闭合
+        open_tags_stack = []
 
-        # 终极清理：清理可能残留的任何内部锚点占位符 (如 ((A)))，确保不出现在电子书中
-        current_html = re.sub(r'\(\([A-Z0-9]+\)\)', '', current_html)
+        # 匹配所有简化标签占位符: <t1>, </t1>, <s1/>
+        tag_pattern = re.compile(r'<(/?t\d+>|s\d+/>)')
 
-        # 2. 应用折叠标签 (按洋葱模型在外周还原, 即逆序还原)
-        import copy
-        for fmt in reversed(folded_tags):
-            ftype = fmt.get('fold_type', 'wrap')
-            new_tag = soup.new_tag(fmt['tag'])
-            for k, v in fmt['attrs'].items():
-                new_tag[k] = v
+        def replacement_func(match):
+            placeholder = match.group(1) # e.g. "t1>", "/t1>", "s1/>"
+            full_tag = "<" + placeholder
             
-            if ftype == 'wrap':
-                inner_soup = BeautifulSoup(current_html, 'html.parser')
-                target_inner = inner_soup.body if inner_soup.body else inner_soup
-                for node in list(target_inner.contents):
-                    new_tag.append(copy.copy(node))
-                current_html = str(new_tag)
-            elif ftype == 'prefix':
-                current_html = str(new_tag) + current_html
-            elif ftype == 'suffix':
-                current_html = current_html + str(new_tag)
+            # 归一化 ID 用于查找 (e.g. </t1> -> <t1>)
+            search_id = full_tag
+            if full_tag.startswith('</t'):
+                search_id = full_tag.replace('</t', '<t')
+            
+            if search_id not in format_map:
+                # 忽略 ID 不存在的标签 (用户要求：若有错误标签，则忽略)
+                return ""
+            
+            f = format_map[search_id]
+            tag_name = f['tag']
+            
+            # 生成真实的开始或结束标签
+            if full_tag.startswith('<s'): # 自闭合
+                t = soup.new_tag(tag_name)
+                for k, v in f['attrs'].items():
+                    if isinstance(v, list): v = " ".join(v)
+                    t[k] = v
+                return str(t)
+            
+            elif full_tag.startswith('<t'): # 开始标签
+                t = soup.new_tag(tag_name)
+                for k, v in f['attrs'].items():
+                    if isinstance(v, list): v = " ".join(v)
+                    t[k] = v
+                open_tags_stack.append(tag_name)
+                # str(t) 会输出 <tag>内容</tag>，我们只需要前半截
+                return str(t).replace(f"</{tag_name}>", "")
+            
+            elif full_tag.startswith('</t'): # 结束标签
+                if open_tags_stack and open_tags_stack[-1] == tag_name:
+                    open_tags_stack.pop()
+                    return f"</{tag_name}>"
+                else:
+                    # 不匹配或顺序错误的结束标签 -> 忽略以维持结构
+                    return ""
+            
+            return ""
 
-        element.clear()
+        # 执行单次替换，确保不会因为索引变动导致错误
+        current_html = tag_pattern.sub(replacement_func, current_html)
+        
+        # 自动闭合所有剩余的标签（洋葱模型）
+        while open_tags_stack:
+            tag_name = open_tags_stack.pop()
+            current_html += f"</{tag_name}>"
+
+        element = original_block['element']
+        import copy
         final_soup = BeautifulSoup(current_html, 'html.parser')
         target_root = final_soup.body if final_soup.body else final_soup
         
+        element.clear()
         for node in list(target_root.contents):
             element.append(copy.copy(node))
 
