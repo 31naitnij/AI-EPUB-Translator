@@ -5,7 +5,6 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from src.core.epub_anchor_processor import EPubAnchorProcessor
-from bs4 import BeautifulSoup
 
 class Processor:
     def __init__(self, cache_dir):
@@ -47,49 +46,10 @@ class Processor:
         
         # 核心改进：加载后同步确保镜像文件被打上 ID 标签
         # 否则 apply_chunk_to_mirror 会因为找不到 ID 而跳过
-        if data.get("source_type") == "epub_anchor":
-            self.ensure_source_mirror_tagged(input_path, data, callback=callback)
-
         # 缓存加载后，自动验证所有已翻译块的格式
         self.validate_all_chunks(input_path, data, callback=callback)
         return data
 
-    def ensure_source_mirror_tagged(self, input_path, cached_data, callback=None):
-        """
-        确保 source/ 镜像中的 HTML 文件已全部打上 data-trans-idx 标签。
-        这是 apply_chunk_to_mirror 能够运行的前提。
-        """
-        source_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
-        if not os.path.exists(source_dir):
-            self.ensure_source_mirror(input_path, "epub")
-            
-        block_to_file = cached_data.get("block_to_file", {})
-        if not block_to_file: return
-        
-        # 反向映射：file -> list of blocks
-        file_to_blocks = {}
-        for b_idx, rel_path in block_to_file.items():
-            if rel_path not in file_to_blocks: file_to_blocks[rel_path] = []
-            file_to_blocks[rel_path].append(int(b_idx))
-            
-        for rel_path, b_indices in file_to_blocks.items():
-            abs_path = os.path.join(source_dir, rel_path)
-            if not os.path.exists(abs_path): continue
-            
-            with open(abs_path, 'r', encoding='utf-8') as f:
-                soup = BeautifulSoup(f, 'html.parser')
-            
-            # 检查是否已打标 (抽样检查第一个块)
-            sample_idx = min(b_indices)
-            if soup.find(attrs={"data-trans-idx": str(sample_idx)}):
-                continue # 已打标，跳过
-                
-            if callback: callback(f"正在为镜像文件打标: {rel_path} (起始索引: {min(b_indices)})")
-            # 修复：必须传入正确的 start_global_idx，否则 data-trans-idx 会全都从 0 开始
-            self.epub_anchor_processor.create_blocks_from_soup(soup, start_global_idx=min(b_indices))
-            
-            with open(abs_path, 'wb') as f:
-                f.write(soup.encode(formatter='html'))
     
     def validate_all_chunks(self, input_path, cached_data, callback=None):
         """
@@ -215,7 +175,7 @@ class Processor:
         xhtml_files = self.epub_anchor_processor.get_xhtml_files()
         total_files = len(xhtml_files)
         all_blocks = []
-        files_data = [] # List of {"rel_path": ..., "chunks": [...]}
+        files_data = []
         block_to_file = {}
         
         flat_chunk_counter = 0
@@ -223,29 +183,28 @@ class Processor:
         for idx, xhtml_file in enumerate(xhtml_files):
             if callback: callback(f"正在解析文件: {idx+1}/{total_files} ({os.path.basename(xhtml_file)})")
             rel_path = os.path.relpath(xhtml_file, temp_dir)
-            with open(xhtml_file, 'r', encoding='utf-8') as f:
-                soup = BeautifulSoup(f, 'html.parser')
             
-            # Step 1: Extract block nodes and assign 'data-trans-idx'
-            file_blocks = self.epub_anchor_processor.create_blocks_from_soup(
-                soup, 
+            # 纯字符串读取，不使用任何解析库
+            with open(xhtml_file, 'r', encoding='utf-8') as f:
+                html_string = f.read()
+            
+            # 逐行提取含文本的行
+            file_blocks = self.epub_anchor_processor.create_blocks_from_html(
+                html_string, 
                 start_global_idx=len(all_blocks)
             )
             
             if not file_blocks: continue
-            
-            # Step 2: Save metadata-tagged HTML to mirror
-            with open(xhtml_file, 'w', encoding='utf-8') as f:
-                f.write(str(soup))
 
-            # Step 3: Chunk blocks within THIS file only
+            # 按字符数分组
             file_chunks_blocks = []
             current_chunk = []
             current_size = 0
             
-            for b_idx, b in enumerate(file_blocks):
+            for b in file_blocks:
+                text_len = len(b['simplified'])
                 current_chunk.append(b)
-                current_size += b['size']
+                current_size += text_len
                 if current_size >= max_chars:
                     file_chunks_blocks.append(current_chunk)
                     current_chunk = []
@@ -253,21 +212,11 @@ class Processor:
             if current_chunk:
                 file_chunks_blocks.append(current_chunk)
 
-            # Step 4: Local Tag Reset for each chunk in the file
+            # 构建 chunk 元数据
             chunk_metadata_list = []
             for chunk_blocks in file_chunks_blocks:
-                chunk_tag_counter = 0 
                 block_indices = []
                 for b in chunk_blocks:
-                    # Re-extract with local IDs starting from t1/s1
-                    text, formats, next_idx = self.epub_anchor_processor.extract_block_with_local_ids(
-                        b['element'], 
-                        current_tag_idx=chunk_tag_counter
-                    )
-                    b['text'] = text
-                    b['formats'] = formats
-                    chunk_tag_counter = next_idx
-                    
                     g_idx = b['global_idx']
                     block_indices.append(g_idx)
                     block_to_file[g_idx] = rel_path
@@ -279,7 +228,6 @@ class Processor:
                     "is_error": False
                 }
                 chunk_metadata_list.append(chunk_meta)
-                # Save chunk to disk for individual access
                 self.save_chunk(input_path, flat_chunk_counter, chunk_meta)
                 flat_chunk_counter += 1
 
@@ -290,7 +238,7 @@ class Processor:
             })
             all_blocks.extend(file_blocks)
 
-        # Step 5: Construct Final Metadata
+        # 构建最终元数据
         cached_data = {
             "source_type": "epub_anchor",
             "working_dir": temp_dir,
@@ -298,7 +246,7 @@ class Processor:
             "input_ext": ".epub",
             "current_flat_idx": 0,
             "files": files_data,
-            "all_blocks": [{"text": b['text'], "formats": b['formats']} for b in all_blocks],
+            "all_blocks": [{"text": b['simplified'], "formats": b['tag_mapping'], "line_idx": b['line_idx'], "indent": b['indent'], "trailing": b['trailing']} for b in all_blocks],
             "finished": False,
             "block_to_file": block_to_file
         }
@@ -407,6 +355,7 @@ class Processor:
     def apply_chunk_to_mirror(self, input_path, cached_data, chunk_idx):
         """
         实时将翻译块回写到 source/ 镜像中。
+        纯行级字符串替换，不使用任何解析库。
         """
         f_idx, c_idx = -1, -1
         flat_counter = 0
@@ -422,73 +371,55 @@ class Processor:
         chunk = cached_data["files"][f_idx]["chunks"][c_idx]
         if not chunk["trans"]: return
         
-        # 实时将翻译块回写到 source/ 镜像中
-        # 注意：即便 chunk["is_error"] 为 True (比如内部锚点不平衡)，
-        # 只要行边界对应，我们仍然尝试回写 (epub_anchor_processor 会处理降级)
-        
-        # 确定受影响的文件
         block_to_file = cached_data.get("block_to_file", {})
         affected_files = set()
         for b_idx in chunk["block_indices"]:
             affected_files.add(block_to_file.get(str(b_idx)))
             
-        source_type = cached_data.get("source_type")
         source_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
         
-        # 解析响应
         orig_indices = chunk["block_indices"]
         group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in orig_indices]
         
-        # Passthrough auto_repair=False because we assume it's valid or already checked
-        if source_type == "epub_anchor":
-            trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
-        else:
-            return # Only EPUB supported
-            
-        # 即使 ok=False (部分块缺失或格式有误)，我们也继续。
-        # validate_and_parse_response 已经确保了 trans_texts 的长度与 orig_indices 对齐（缺失部分回退到原文）。
-        # if not ok: return 
+        trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
         
-        # 逐个文件更新
         for rel_path in affected_files:
             if not rel_path: continue
             abs_path = os.path.join(source_dir, rel_path)
+            if not os.path.exists(abs_path): continue
             
-            if source_type == "epub_anchor":
-                with open(abs_path, 'r', encoding='utf-8') as f:
-                    soup = BeautifulSoup(f, 'html.parser')
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # 逐块回填：直接按行号替换
+            for b_idx, text in zip(orig_indices, trans_texts):
+                if block_to_file.get(str(b_idx)) != rel_path:
+                    continue
+                block_meta = cached_data["all_blocks"][b_idx]
+                line_idx = block_meta.get("line_idx")
+                tag_mapping = block_meta.get("formats", {})
+                indent = block_meta.get("indent", "")
+                trailing = block_meta.get("trailing", "\n")
                 
-                # 核心修复：必须确定该文件在全局块列表中的起始索引
-                # 我们从 block_to_file 反查
-                file_b_indices = [int(b) for b, path in block_to_file.items() if path == rel_path]
-                file_start_idx = min(file_b_indices) if file_b_indices else 0
-                
-                soup_blocks = self.epub_anchor_processor.create_blocks_from_soup(soup, start_global_idx=file_start_idx)
-                
-                # 建立 data-trans-idx 到 soup block 的映射
-                block_map = {b['element'].get('data-trans-idx'): b for b in soup_blocks}
-                
-                for b_idx, text in zip(orig_indices, trans_texts):
-                    if block_to_file.get(str(b_idx)) == rel_path:
-                        target_b = block_map.get(str(b_idx))
-                        if target_b:
-                            self.epub_anchor_processor.restore_html(target_b, text, soup)
-                
-                with open(abs_path, 'wb') as f:
-                    f.write(soup.encode(formatter='html'))
+                if line_idx is not None and 0 <= line_idx < len(lines):
+                    restored = self.epub_anchor_processor.restore_line(
+                        text, tag_mapping, indent, trailing
+                    )
+                    lines[line_idx] = restored
+            
+            with open(abs_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
 
     def finalize_epub_anchor_translation(self, input_path, output_path):
         """
         导出前进行最后一次全量同步，确保所有已翻译块都写入镜像。
+        纯行级字符串替换，不使用任何解析库。
         """
         cached_data = self.load_cache(input_path)
         if not cached_data:
             raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
-            
-        # 1. 确保镜像已打标
-        self.ensure_source_mirror_tagged(input_path, cached_data)
         
-        # 2. 全量回写（优化：按文件聚合回写，避免反复开关文件）
+        # 按文件聚合回写
         source_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
         block_to_file = cached_data.get("block_to_file", {})
         
@@ -507,14 +438,7 @@ class Processor:
             if not os.path.exists(abs_path): continue
             
             with open(abs_path, 'r', encoding='utf-8') as f:
-                soup = BeautifulSoup(f, 'html.parser')
-            
-            # 核心修复：同样需要正确的起始索引
-            file_b_indices = [int(b) for b, path in block_to_file.items() if path == rel_path]
-            file_start_idx = min(file_b_indices) if file_b_indices else 0
-            
-            soup_blocks = self.epub_anchor_processor.create_blocks_from_soup(soup, start_global_idx=file_start_idx)
-            block_map = {b['element'].get('data-trans-idx'): b for b in soup_blocks}
+                lines = f.readlines()
             
             for f_idx, chunk in chunks:
                 orig_indices = chunk["block_indices"]
@@ -522,14 +446,22 @@ class Processor:
                 trans_texts, _ = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
                 
                 for b_idx, text in zip(orig_indices, trans_texts):
-                    target_b = block_map.get(str(b_idx))
-                    if target_b:
-                        self.epub_anchor_processor.restore_html(target_b, text, soup)
+                    block_meta = cached_data["all_blocks"][b_idx]
+                    line_idx = block_meta.get("line_idx")
+                    tag_mapping = block_meta.get("formats", {})
+                    indent = block_meta.get("indent", "")
+                    trailing = block_meta.get("trailing", "\n")
+                    
+                    if line_idx is not None and 0 <= line_idx < len(lines):
+                        restored = self.epub_anchor_processor.restore_line(
+                            text, tag_mapping, indent, trailing
+                        )
+                        lines[line_idx] = restored
             
-            with open(abs_path, 'wb') as f:
-                f.write(soup.encode(formatter='html'))
+            with open(abs_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
 
-        # 3. 打包
+        # 打包
         self.epub_anchor_processor.temp_dir = source_dir
         self.epub_anchor_processor.repack_epub(output_path)
         return f"导出成功：{output_path}\n已同步 {len(file_to_chunks)} 个文件的翻译内容。"
