@@ -93,17 +93,26 @@ class Processor:
 
     def ensure_source_mirror(self, input_path, processor_type, callback=None):
         """
-        确保书籍被解压到缓存目录下的 source/ 文件夹。
+        确保书籍被解压到缓存目录下。
+        - original/ : 永不修改的原始副本（母版）
+        - source/   : 翻译回填的工作副本
         如果已存在则跳过解压。
         """
         cache_dir = self.ensure_cache_dir(input_path)
+        original_dir = os.path.join(cache_dir, "original")
         source_dir = os.path.join(cache_dir, "source")
-        if not os.path.exists(source_dir):
-            if callback: callback(f"正在建立永久源码镜像: {source_dir}")
+        
+        if not os.path.exists(original_dir):
+            if callback: callback(f"正在解压并建立原始母版: {original_dir}")
             self.epub_anchor_processor.extract_epub(input_path, callback=callback)
-            # 将临时目录移动到 source_dir
-            shutil.move(self.epub_anchor_processor.temp_dir, source_dir)
-            self.epub_anchor_processor.temp_dir = source_dir
+            # 将临时目录移动到 original_dir（永不修改的母版）
+            shutil.move(self.epub_anchor_processor.temp_dir, original_dir)
+        
+        if not os.path.exists(source_dir):
+            if callback: callback(f"正在从母版复制工作副本: {source_dir}")
+            shutil.copytree(original_dir, source_dir)
+        
+        self.epub_anchor_processor.temp_dir = source_dir
         return source_dir
 
     def save_metadata(self, input_path, data):
@@ -349,8 +358,20 @@ class Processor:
         return True
 
 
-    def finalize_translation(self, input_path, output_path, target_format=None):
-        return self.finalize_epub_anchor_translation(input_path, output_path)
+    def finalize_translation(self, input_path, output_dir, target_format=None):
+        """
+        同时生成纯译文版和双语对照版两个 EPUB。
+        output_dir: 输出目录路径
+        返回: (translated_path, bilingual_path, message)
+        """
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        translated_path = os.path.join(output_dir, f"translated_{base_name}.epub")
+        bilingual_path = os.path.join(output_dir, f"bilingual_{base_name}.epub")
+        
+        msg1 = self.finalize_epub_anchor_translation(input_path, translated_path)
+        msg2 = self.finalize_bilingual_translation(input_path, bilingual_path)
+        
+        return translated_path, bilingual_path, f"{msg1}\n{msg2}"
 
     def apply_chunk_to_mirror(self, input_path, cached_data, chunk_idx):
         """
@@ -410,19 +431,9 @@ class Processor:
             with open(abs_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
 
-    def finalize_epub_anchor_translation(self, input_path, output_path):
-        """
-        导出前进行最后一次全量同步，确保所有已翻译块都写入镜像。
-        纯行级字符串替换，不使用任何解析库。
-        """
-        cached_data = self.load_cache(input_path)
-        if not cached_data:
-            raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
-        
-        # 按文件聚合回写
-        source_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
+    def _collect_file_to_chunks(self, cached_data):
+        """按文件聚合所有已翻译的 chunk，返回 {rel_path: [(flat_idx, chunk), ...]}"""
         block_to_file = cached_data.get("block_to_file", {})
-        
         file_to_chunks = {}
         flat_idx = 0
         for f_data in cached_data["files"]:
@@ -432,20 +443,33 @@ class Processor:
                     if rel_path not in file_to_chunks: file_to_chunks[rel_path] = []
                     file_to_chunks[rel_path].append((flat_idx, chunk))
                 flat_idx += 1
-                
+        return file_to_chunks
+
+    def _apply_translation_to_dir(self, target_dir, cached_data, file_to_chunks, mode="replace"):
+        """
+        将翻译回写到指定目录中的文件。
+        mode="replace": 纯译文版（替换原文）
+        mode="bilingual": 对照版（原文下方插入译文）
+        """
         for rel_path, chunks in file_to_chunks.items():
-            abs_path = os.path.join(source_dir, rel_path)
+            abs_path = os.path.join(target_dir, rel_path)
             if not os.path.exists(abs_path): continue
             
             with open(abs_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
+            
+            # 收集所有需要处理的 (line_idx, restored_line) 对
+            replacements = []  # [(line_idx, restored_line), ...]
             
             for f_idx, chunk in chunks:
                 orig_indices = chunk["block_indices"]
                 group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in orig_indices]
                 trans_texts, _ = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
                 
+                block_to_file = cached_data.get("block_to_file", {})
                 for b_idx, text in zip(orig_indices, trans_texts):
+                    if block_to_file.get(str(b_idx)) != rel_path:
+                        continue
                     block_meta = cached_data["all_blocks"][b_idx]
                     line_idx = block_meta.get("line_idx")
                     tag_mapping = block_meta.get("formats", {})
@@ -456,12 +480,78 @@ class Processor:
                         restored = self.epub_anchor_processor.restore_line(
                             text, tag_mapping, indent, trailing
                         )
-                        lines[line_idx] = restored
+                        replacements.append((line_idx, restored))
+            
+            if mode == "replace":
+                # 纯译文版：直接替换
+                for line_idx, restored in replacements:
+                    lines[line_idx] = restored
+            elif mode == "bilingual":
+                # 对照版：在原文行下方插入译文行
+                # 必须从后往前插入，避免行号偏移
+                replacements.sort(key=lambda x: x[0], reverse=True)
+                for line_idx, restored in replacements:
+                    # 原文行保持不变，在其下方插入译文行
+                    lines.insert(line_idx + 1, restored)
             
             with open(abs_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
 
+    def finalize_epub_anchor_translation(self, input_path, output_path):
+        """
+        导出纯译文版：从 original/ 复制干净副本，回填翻译后打包。
+        """
+        cached_data = self.load_cache(input_path)
+        if not cached_data:
+            raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
+        
+        cache_dir = self.get_cache_dir_path(input_path)
+        original_dir = os.path.join(cache_dir, "original")
+        work_dir = os.path.join(cache_dir, "_tmp_translated")
+        
+        # 从 original 复制干净副本
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir)
+        shutil.copytree(original_dir, work_dir)
+        
+        file_to_chunks = self._collect_file_to_chunks(cached_data)
+        self._apply_translation_to_dir(work_dir, cached_data, file_to_chunks, mode="replace")
+        
         # 打包
-        self.epub_anchor_processor.temp_dir = source_dir
+        self.epub_anchor_processor.temp_dir = work_dir
         self.epub_anchor_processor.repack_epub(output_path)
-        return f"导出成功：{output_path}\n已同步 {len(file_to_chunks)} 个文件的翻译内容。"
+        
+        # 清理临时目录
+        shutil.rmtree(work_dir, ignore_errors=True)
+        
+        return f"纯译文版导出成功：{output_path}\n已同步 {len(file_to_chunks)} 个文件。"
+
+    def finalize_bilingual_translation(self, input_path, output_path):
+        """
+        导出双语对照版：从 original/ 复制干净副本，
+        将译文插入到原文下一行后打包。
+        """
+        cached_data = self.load_cache(input_path)
+        if not cached_data:
+            raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
+        
+        cache_dir = self.get_cache_dir_path(input_path)
+        original_dir = os.path.join(cache_dir, "original")
+        work_dir = os.path.join(cache_dir, "_tmp_bilingual")
+        
+        # 从 original 复制干净副本
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir)
+        shutil.copytree(original_dir, work_dir)
+        
+        file_to_chunks = self._collect_file_to_chunks(cached_data)
+        self._apply_translation_to_dir(work_dir, cached_data, file_to_chunks, mode="bilingual")
+        
+        # 打包
+        self.epub_anchor_processor.temp_dir = work_dir
+        self.epub_anchor_processor.repack_epub(output_path)
+        
+        # 清理临时目录
+        shutil.rmtree(work_dir, ignore_errors=True)
+        
+        return f"双语对照版导出成功：{output_path}\n已同步 {len(file_to_chunks)} 个文件。"

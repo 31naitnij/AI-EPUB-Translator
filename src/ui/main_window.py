@@ -1088,8 +1088,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先初始化并翻译文件。")
             return
 
-        # cache_file = self.processor.get_cache_filename(file_path)
-        # load_cache expects the INPUT file path, not the cache path
         cache_data = self.processor.load_cache(file_path)
         
         if not cache_data:
@@ -1099,20 +1097,17 @@ class MainWindow(QMainWindow):
         output_root = self.output_path_edit.text()
         if not os.path.exists(output_root):
             os.makedirs(output_root)
-            
-        ext = os.path.splitext(file_path)[1].lower()
-        file_ext = ext.lstrip('.')
-        target_format = file_ext
-
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        output_path = os.path.join(output_root, f"translated_{base_name}.{file_ext}")
 
         try:
-            self.status_label.setText("正在导出...")
-            msg = self.processor.finalize_translation(file_path, output_path, target_format)
+            self.status_label.setText("正在导出纯译文版和双语对照版...")
+            translated_path, bilingual_path, msg = self.processor.finalize_translation(file_path, output_root)
             
-            self.status_label.setText("导出成功")
-            QMessageBox.information(self, "成功", f"导出完成！\n{msg}")
+            self.status_label.setText("导出成功（两个版本）")
+            QMessageBox.information(self, "成功", 
+                f"导出完成！\n\n"
+                f"📖 纯译文版：{translated_path}\n"
+                f"📖 双语对照版：{bilingual_path}\n\n"
+                f"{msg}")
             
         except Exception as e:
             import traceback

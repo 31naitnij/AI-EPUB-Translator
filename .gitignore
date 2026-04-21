@@ -54,5 +54,11 @@ out_styled.docx
 ref.docx
 test_table_gen.docx
 debug_*.py
+check_sigs.py
+create_test_epub.py
 test_cache/
 *.epub
+temp_cache/
+test_source/
+_test_*/
+_verify_*/
