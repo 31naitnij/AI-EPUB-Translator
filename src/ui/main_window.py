@@ -15,6 +15,7 @@ import re
 from src.core.config_manager import ConfigManager
 from src.core.translator import Translator
 from src.core.processor import Processor
+from src.core.processor_direct import ProcessorDirect
 
 class SymbolHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
@@ -259,6 +260,14 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.output_path_edit)
         output_layout.addWidget(btn_browse_output)
         path_layout.addLayout(output_layout)
+        
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("翻译模式:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["默认模式 (标签简化 + 双语输出)", "直接 HTML 模式 (全文本 + 仅纯译文)"])
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.mode_combo, 1)
+        path_layout.addLayout(mode_layout)
         
         top_layout.addWidget(path_group)
 
@@ -565,6 +574,13 @@ class MainWindow(QMainWindow):
             s = self.history_combo.itemData(index)
             self.set_settings(s)
 
+    def on_mode_changed(self, index):
+        from src.config import DEFAULT_PROMPT, DIRECT_PROMPT
+        if index == 1:
+            self.prompt_edit.setPlainText(DIRECT_PROMPT)
+        else:
+            self.prompt_edit.setPlainText(DEFAULT_PROMPT)
+
     def prepare_chunks_only(self):
         result = self.init_processor_and_chunks()
         if result:
@@ -581,7 +597,11 @@ class MainWindow(QMainWindow):
 
         settings = self.get_current_settings()
         cache_dir = self.cache_path_edit.text()
-        self.processor = Processor(cache_dir)
+        
+        if self.mode_combo.currentIndex() == 1:
+            self.processor = ProcessorDirect(cache_dir)
+        else:
+            self.processor = Processor(cache_dir)
         
         try:
             ext = os.path.splitext(file_path)[1].lower()
@@ -1006,7 +1026,10 @@ class MainWindow(QMainWindow):
             return
             
         cache_dir = self.cache_path_edit.text()
-        proc = Processor(cache_dir)
+        if self.mode_combo.currentIndex() == 1:
+            proc = ProcessorDirect(cache_dir)
+        else:
+            proc = Processor(cache_dir)
         
         # 获取新旧两种可能的路径
         folder_cache = proc.get_cache_dir_path(file_path)
@@ -1099,15 +1122,22 @@ class MainWindow(QMainWindow):
             os.makedirs(output_root)
 
         try:
-            self.status_label.setText("正在导出纯译文版和双语对照版...")
+            self.status_label.setText("正在导出翻译结果...")
             translated_path, bilingual_path, msg = self.processor.finalize_translation(file_path, output_root)
             
-            self.status_label.setText("导出成功（两个版本）")
-            QMessageBox.information(self, "成功", 
-                f"导出完成！\n\n"
-                f"📖 纯译文版：{translated_path}\n"
-                f"📖 双语对照版：{bilingual_path}\n\n"
-                f"{msg}")
+            self.status_label.setText("导出成功")
+            
+            if bilingual_path:
+                QMessageBox.information(self, "成功", 
+                    f"导出完成！\n\n"
+                    f"📖 纯译文版：{translated_path}\n"
+                    f"📖 双语对照版：{bilingual_path}\n\n"
+                    f"{msg}")
+            else:
+                QMessageBox.information(self, "成功", 
+                    f"导出完成！\n\n"
+                    f"📖 纯译文版：{translated_path}\n\n"
+                    f"{msg}")
             
         except Exception as e:
             import traceback

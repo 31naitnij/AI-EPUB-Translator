@@ -10,6 +10,8 @@ from src.ui.main_window import MainWindow
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
+    if "--direct" in sys.argv:
+        window.mode_combo.setCurrentIndex(1)
     window.show()
     sys.exit(app.exec())
 

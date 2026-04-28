@@ -53,8 +53,21 @@ if !errorlevel! neq 0 (
 
 :: 3. 运行程序
 echo.
+echo =========================================
+echo 请选择启动模式:
+echo 1. 默认模式 (标签简化 + 双语输出)
+echo 2. 直接 HTML 模式 (全文本 + 仅纯译文)
+echo =========================================
+set /p mode_choice="输入数字 (1/2, 默认1): "
+
+set "RUN_ARGS="
+if "%mode_choice%"=="2" (
+    set "RUN_ARGS=--direct"
+)
+
+echo.
 echo [3/3] 正在启动 AI EPUB Translator...
-"%VENV_DIR%\Scripts\python" main.py
+"%VENV_DIR%\Scripts\python" main.py %RUN_ARGS%
 
 if !errorlevel! neq 0 (
     echo.
