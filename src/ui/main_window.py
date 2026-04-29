@@ -813,6 +813,11 @@ class MainWindow(QMainWindow):
             self.trans_text_edit.setPlainText(chunk.get("trans", ""))
 
         settings = self.get_current_settings()
+        
+        # Save to history (ensure temp, interval, timeout etc. are persisted)
+        self.config_manager.save_config(settings)
+        self.load_settings_history()
+        
         translator = Translator(
             settings['api_key'], 
             settings['api_url'], 
