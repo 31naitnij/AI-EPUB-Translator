@@ -46,22 +46,36 @@ class Translator:
                 return response.choices[0].message.content
 
         try:
-            try:
-                # 1. Try Doubao-style nested object
-                return do_request(extra_body={"thinking": {"type": "disabled"}})
-            except Exception as e1:
-                # 2. Try string style as fallback
-                if any(x in str(e1) for x in ["400", "BadRequest", "InvalidParameter"]):
-                    try:
-                        return do_request(extra_body={"thinking": "disabled"})
-                    except Exception as e2:
-                        # 3. Final fallback: retry without thinking parameter
-                        if any(x in str(e2) for x in ["400", "BadRequest", "InvalidParameter"]):
-                            return do_request(extra_body=None)
-                        else:
-                            raise e2
-                else:
-                    raise e1
+            # Mode 0: Doubao-style nested object
+            if getattr(self, '_extra_body_mode', 0) == 0:
+                try:
+                    res = do_request(extra_body={"thinking": {"type": "disabled"}})
+                    self._extra_body_mode = 0
+                    return res
+                except Exception as e1:
+                    if any(x in str(e1) for x in ["400", "422", "500", "502", "BadRequest", "InvalidParameter", "BadGateway", "Unprocessable"]):
+                        self._extra_body_mode = 1
+                    else:
+                        raise e1
+
+            # Mode 1: String style
+            if getattr(self, '_extra_body_mode', 0) == 1:
+                try:
+                    res = do_request(extra_body={"thinking": "disabled"})
+                    self._extra_body_mode = 1
+                    return res
+                except Exception as e2:
+                    if any(x in str(e2) for x in ["400", "422", "500", "502", "BadRequest", "InvalidParameter", "BadGateway", "Unprocessable"]):
+                        self._extra_body_mode = 2
+                    else:
+                        raise e2
+
+            # Mode 2: No extra_body (Standard OpenAI)
+            if getattr(self, '_extra_body_mode', 0) == 2:
+                res = do_request(extra_body=None)
+                self._extra_body_mode = 2
+                return res
+
         except Exception as e:
             print(f"翻译出错: {e}")
             return f"[翻译错误: {e}]"
