@@ -34,13 +34,55 @@ class EPubDirectProcessor:
     # ──────────────────────────────────────────────
 
     def extract_epub(self, epub_path, callback=None):
-        """将 EPUB 完整解压到临时目录"""
+        """将 EPUB 完整解压到临时目录并进行预格式化"""
         if callback:
             callback(f"正在解压 EPUB: {epub_path}")
         self.temp_dir = tempfile.mkdtemp(prefix="epub_")
         with zipfile.ZipFile(epub_path, 'r') as zip_ref:
             zip_ref.extractall(self.temp_dir)
+            
+        self._format_html_files(callback)
         return self.temp_dir
+
+    def _format_html_files(self, callback=None):
+        """对所有 HTML 文件进行块级安全重排（美化），解决由于同行多个块级标签导致的翻译分块过大问题"""
+        xhtml_files = self.get_xhtml_files()
+        if not xhtml_files:
+            return
+            
+        import re
+        # Tags that should start on a new line
+        BLOCK_OPEN_TAGS = ['p', 'div', 'h[1-6]', 'ul', 'ol', 'li', 'blockquote', 'table', 'tr', 'td', 'th', 'figure', 'header', 'footer', 'article', 'section', 'aside', 'nav']
+        BLOCK_CLOSE_TAGS = BLOCK_OPEN_TAGS
+        SELF_CLOSING = ['br', 'hr']
+
+        pattern_open = re.compile(r'(<(?:' + '|'.join(BLOCK_OPEN_TAGS) + r')\b[^>]*>)', re.IGNORECASE)
+        pattern_close = re.compile(r'(</(?:' + '|'.join(BLOCK_CLOSE_TAGS) + r')\b[^>]*>)', re.IGNORECASE)
+        pattern_self = re.compile(r'(</?(?:' + '|'.join(SELF_CLOSING) + r')\b[^>]*>)', re.IGNORECASE)
+
+        for filepath in xhtml_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                res = content
+                # Add \n before opening tags
+                res = pattern_open.sub(r'\n\g<1>', res)
+                # Add \n after closing tags
+                res = pattern_close.sub(r'\g<1>\n', res)
+                # Add \n after self closing tags
+                res = pattern_self.sub(r'\g<1>\n', res)
+                
+                # Collapse multiple empty lines
+                res = re.sub(r'\n\s*\n', '\n', res)
+                
+                # Only save if changed to save I/O
+                if res != content:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(res)
+            except Exception as e:
+                if callback:
+                    callback(f"预格式化文件失败 {os.path.basename(filepath)}: {e}")
 
     def get_xhtml_files(self):
         """返回 EPUB 中所有 XHTML/HTML 内容文件（包括目录文件）"""
