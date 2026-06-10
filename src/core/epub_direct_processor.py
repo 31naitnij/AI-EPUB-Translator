@@ -44,37 +44,79 @@ class EPubDirectProcessor:
         self._format_html_files(callback)
         return self.temp_dir
 
+    def normalize_html_files(self, target_dir=None, callback=None):
+        """
+        公开接口：对指定目录（或 self.temp_dir）中的所有 HTML 文件进行规范化排版。
+        使阅读排版与代码排版一致：每个块级元素独占一行，元素之间有空行分隔。
+        可在任意时机调用（不仅限于初始解压）。
+        """
+        old_temp_dir = self.temp_dir
+        if target_dir:
+            self.temp_dir = target_dir
+        
+        try:
+            self._format_html_files(callback)
+        finally:
+            self.temp_dir = old_temp_dir
+
     def _format_html_files(self, callback=None):
-        """对所有 HTML 文件进行块级安全重排（美化），解决由于同行多个块级标签导致的翻译分块过大问题"""
+        """
+        对所有 HTML 文件进行块级安全重排（美化）。
+        核心规则：
+        1. 每个块级开标签前换行，闭标签后换行
+        2. 同行多个块级元素（如 <p>aaa.</p><p>bbb.</p>）拆分为独立行
+        3. 块级元素之间保留一个空行，提升可读性
+        4. 不影响行内标签（<span>, <em>, <strong> 等）
+        """
         xhtml_files = self.get_xhtml_files()
         if not xhtml_files:
             return
             
         import re
-        # Tags that should start on a new line
-        BLOCK_OPEN_TAGS = ['p', 'div', 'h[1-6]', 'ul', 'ol', 'li', 'blockquote', 'table', 'tr', 'td', 'th', 'figure', 'header', 'footer', 'article', 'section', 'aside', 'nav']
-        BLOCK_CLOSE_TAGS = BLOCK_OPEN_TAGS
+        # 块级标签列表
+        BLOCK_TAGS = ['p', 'div', 'h[1-6]', 'ul', 'ol', 'li', 'blockquote', 
+                      'table', 'tr', 'td', 'th', 'thead', 'tbody', 'tfoot',
+                      'figure', 'figcaption', 'header', 'footer', 
+                      'article', 'section', 'aside', 'nav', 'main',
+                      'pre', 'details', 'summary', 'dl', 'dt', 'dd']
         SELF_CLOSING = ['br', 'hr']
+        
+        block_tags_pattern = '|'.join(BLOCK_TAGS)
 
-        pattern_open = re.compile(r'(<(?:' + '|'.join(BLOCK_OPEN_TAGS) + r')\b[^>]*>)', re.IGNORECASE)
-        pattern_close = re.compile(r'(</(?:' + '|'.join(BLOCK_CLOSE_TAGS) + r')\b[^>]*>)', re.IGNORECASE)
-        pattern_self = re.compile(r'(</?(?:' + '|'.join(SELF_CLOSING) + r')\b[^>]*>)', re.IGNORECASE)
+        # 匹配块级开标签（含属性）
+        pattern_open = re.compile(
+            r'(<(?:' + block_tags_pattern + r')\b[^>]*>)', re.IGNORECASE)
+        # 匹配块级闭标签
+        pattern_close = re.compile(
+            r'(</(?:' + block_tags_pattern + r')\b[^>]*>)', re.IGNORECASE)
+        # 匹配自闭合标签
+        pattern_self = re.compile(
+            r'(</?(?:' + '|'.join(SELF_CLOSING) + r')\b[^>]*>)', re.IGNORECASE)
 
-        for filepath in xhtml_files:
+        total = len(xhtml_files)
+        for file_idx, filepath in enumerate(xhtml_files):
             try:
+                if callback:
+                    callback(f"正在规范化 HTML: {file_idx+1}/{total} ({os.path.basename(filepath)})")
+                    
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
                 
                 res = content
-                # Add \n before opening tags
+                
+                # 步骤 1: 在块级开标签前插入换行
                 res = pattern_open.sub(r'\n\g<1>', res)
-                # Add \n after closing tags
+                # 步骤 2: 在块级闭标签后插入换行
                 res = pattern_close.sub(r'\g<1>\n', res)
-                # Add \n after self closing tags
+                # 步骤 3: 在自闭合标签后插入换行
                 res = pattern_self.sub(r'\g<1>\n', res)
                 
-                # Collapse multiple empty lines
-                res = re.sub(r'\n\s*\n', '\n', res)
+                # 步骤 4: 规范化连续空行 — 最多保留一个空行（两个换行符）
+                # 先将 3 个及以上连续换行（含中间空白）压缩为两个换行
+                res = re.sub(r'\n\s*\n\s*\n', '\n\n', res)
+                
+                # 步骤 5: 清理文件开头的多余空行
+                res = res.lstrip('\n')
                 
                 # Only save if changed to save I/O
                 if res != content:
@@ -82,7 +124,7 @@ class EPubDirectProcessor:
                         f.write(res)
             except Exception as e:
                 if callback:
-                    callback(f"预格式化文件失败 {os.path.basename(filepath)}: {e}")
+                    callback(f"规范化文件失败 {os.path.basename(filepath)}: {e}")
 
     def get_xhtml_files(self):
         """返回 EPUB 中所有 XHTML/HTML 内容文件（包括目录文件）"""

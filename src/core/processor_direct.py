@@ -152,6 +152,11 @@ class ProcessorDirect:
         temp_dir = self.ensure_source_mirror(input_path, "epub", callback=callback)
         self.epub_anchor_processor.temp_dir = temp_dir
         
+        # 每次分块前，对 source/ 工作副本进行 HTML 规范化
+        # 确保阅读排版与代码排版一致（块级元素独占一行）
+        if callback: callback("正在规范化 HTML 代码排版...")
+        self.epub_anchor_processor.normalize_html_files(target_dir=temp_dir, callback=callback)
+        
         xhtml_files = self.epub_anchor_processor.get_xhtml_files()
         total_files = len(xhtml_files)
         all_blocks = []
