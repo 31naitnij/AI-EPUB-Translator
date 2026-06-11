@@ -1,0 +1,120 @@
+直接模式流程修改计划
+========================
+
+一、当前问题
+-----------
+1. 直接模式以"行"为最小提取单位，逐行提取、逐行发送、逐行回填。
+2. AI 翻译后返回的行数与发送行数经常不一致（合并、拆分、增减空行），
+   导致 validate_and_parse_response 强行对齐时出现混乱，回填到错误位置。
+3. 现有分块仅按 max_chars 简单累加，可能把一个 <p>...</p> 段落切成两半，
+   翻译后语义断裂。
+
+二、修改目标
+-----------
+1. 提取单位从"行"升级为"段落块"（完整的 <p></p> 等块级元素）。
+2. 分块时以段落块为最小单位，<p></p> 不可中断，参考现有 max_chars 阈值原则。
+3. 翻译后"整块替代"原文对应区域，不再逐行 1:1 对齐，彻底解决行数不一致问题。
+4. 保持直接模式"不解析 HTML"的核心原则，只通过正则识别完整标签对。
+
+三、分块原则（保留并细化）
+-------------------------
+- max_chars 仍为分块阈值（默认 2000）。
+- 累加单元变为"段落块"的文本长度。
+- 当前段落块加入后若总长度 >= max_chars，则闭合当前 chunk，开启新 chunk。
+- 单个段落块若本身超过 max_chars，则独立成一个 chunk（不做二次切割）。
+
+四、段落块定义与提取规则
+-------------------------
+- 目标标签：p, h1~h6, li, blockquote, figcaption, dt, dd, summary, pre 等。
+- 提取方式：扫描行，匹配开标签；若同行无闭标签，则继续向下行查找对应闭标签。
+- 记录信息：start_line_idx（起始行号）、end_line_idx（结束行号，包含）、
+  text（完整原文，含换行符）、file_rel_path（所属文件）。
+- 去重/防嵌套：若出现嵌套（如 <li><p>text</p></li>），保留内层、丢弃外层，
+  保证粒度最细。
+- 未被上述规则捕获但含有文本的行（裸文本），视为单行的段落块。
+
+五、整块替换机制
+---------------
+1. 一个 chunk 包含 N 个段落块，这些块在原文中连续或间隔出现（中间可能有空行、
+   img 标签等无文本行）。
+2. 替换范围：从第一个段落块的 start_line_idx 到最后一个段落块的 end_line_idx。
+3. 操作：读取文件所有行 → 保留替换范围之前的行 → 插入翻译后的整块文本
+   （按 \n 拆分为行） → 保留替换范围之后的行。
+4. 行号漂移修正：替换后行数发生变化（delta = 新行数 - 旧行数），需要按文件
+   顺序更新后续所有段落块的起止行号，保证后续 chunk 替换位置正确。
+5. 要求 chunk 必须按顺序处理（当前单线程/顺序处理已满足）。
+
+六、涉及文件与具体修改点
+-------------------------
+【A】src/core/epub_direct_processor.py
+  1. extract_lines() → 改名为 extract_paragraph_blocks()
+     - 逻辑改为识别完整块级标签对（含跨行）。
+     - 返回结构增加 start_line_idx、end_line_idx。
+  2. create_blocks_from_html()
+     - 调用 extract_paragraph_blocks()。
+     - 为 block 增加 file_rel_path 字段（由调用方填入）。
+  3. extract_and_simplify()
+     - 适配新结构（跨行 block 不再需要 indent/trailing，或仅取首行缩进）。
+  4. validate_and_parse_response()
+     - 直接模式不再按行拆分对齐，而是返回整块文本。
+     - 过滤 markdown 代码块标记 ```。
+  5. format_for_ai()
+     - 拼接段落块的 text 字段。
+  6. restore_line()
+     - 此函数在整块替换模式下不再使用，保留兼容或标记弃用。
+
+【B】src/core/processor_direct.py
+  1. process_epub_anchor_init()
+     - 分块循环中累加对象改为段落块，按 max_chars 闭合 chunk。
+     - all_blocks 元数据增加 start_line_idx、end_line_idx、file_rel_path。
+     - block_to_file 继续维护。
+  2. apply_chunk_to_mirror()
+     - 核心改造：从"逐行替换"改为"整块替换"。
+     - 对受影响文件，计算首个 block 的 start_line_idx 和末个 block 的 end_line_idx。
+     - 用 chunk["trans"] 整体覆盖该范围。
+     - 计算 delta 并更新同文件后续 block 的行号。
+  3. _apply_translation_to_dir()
+     - 同样改为整块替换逻辑。
+  4. check_chunk_format()
+     - 直接模式不再需要严格行数检查，放宽或改为仅检查非空。
+  5. load_cache() / save_metadata()
+     - 兼容新的 all_blocks 字段。
+
+【C】src/ui/main_window.py
+  - 若 ProcessorDirect 的公开接口（process_epub_anchor_init、process_run、
+    finalize_translation）参数/返回值不变，则 UI 层无需修改。
+  - 需要确认 process_run 中的 callback 参数和返回值格式是否仍兼容。
+
+七、工作流程
+-----------
+1. 解压 EPUB → 规范化 HTML（已有逻辑）。
+2. 对每个 HTML 文件：
+   a. 提取段落块（完整 <p></p> 等）。
+   b. 按 max_chars 累加段落块，组成 chunks。
+   c. 每个 chunk 记录：orig（拼接原文）、block_indices、
+      file_start_line（首块起始行）、file_end_line（末块结束行）。
+3. 翻译流程：
+   a. 取 chunk["orig"] 发送 AI。
+   b. AI 返回整块翻译文本，存入 chunk["trans"]。
+   c. 调用 apply_chunk_to_mirror() 整块替换到 source/ 工作副本。
+   d. 更新后续 block 行号。
+   e. 保存 chunk 缓存和 metadata。
+4. 导出流程：
+   a. finalize_translation() 收集所有已翻译 chunk。
+   b. 对每个文件按 chunk 顺序执行整块替换。
+   c. 打包 EPUB。
+
+八、风险与回退
+-------------
+- 风险：AI 返回的整块文本若丢失或错误增删 HTML 标签，可能导致格式破坏。
+  缓解：保留原有格式检查的可选逻辑，但不再因行数不一致阻断流程。
+- 风险：行号漂移更新若遗漏，会导致后续 chunk 错位。
+  缓解：严格按文件隔离、按顺序更新；增加断言检查 start_line_idx <= end_line_idx。
+- 回退：如出现问题，可回退到当前 git 版本。
+
+九、实施顺序
+-----------
+1. 修改 epub_direct_processor.py（提取、格式化、解析）。
+2. 修改 processor_direct.py（分块、替换、导出）。
+3. 检查 main_window.py 调用兼容性。
+4. 本地简单测试（用最小 EPUB 验证分块和替换逻辑）。

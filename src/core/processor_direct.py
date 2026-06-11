@@ -22,6 +22,12 @@ class ProcessorDirect:
         data = self.load_metadata(input_path)
         if not data: return None
         
+        # 兼容检查：若 all_blocks 缺少新字段，视为旧缓存，返回 None 强制重新初始化
+        if data.get("all_blocks"):
+            first_block = data["all_blocks"][0]
+            if "start_line_idx" not in first_block:
+                return None
+        
         # 聚合 chunks
         if data.get("files"):
              total_chunks = sum(len(f.get("chunks", [])) for f in data["files"])
@@ -173,8 +179,9 @@ class ProcessorDirect:
                 html_string = f.read()
             
             file_blocks = self.epub_anchor_processor.create_blocks_from_html(
-                html_string, 
-                start_global_idx=len(all_blocks)
+                html_string,
+                start_global_idx=len(all_blocks),
+                file_rel_path=rel_path
             )
             
             if not file_blocks: continue
@@ -184,13 +191,22 @@ class ProcessorDirect:
             current_size = 0
             
             for b in file_blocks:
-                text_len = len(b['simplified'])
-                current_chunk.append(b)
-                current_size += text_len
-                if current_size >= max_chars:
+                text_len = len(b['text'])
+                # 单个段落块若超过阈值，独立成块，不做二次切割
+                if text_len >= max_chars:
+                    if current_chunk:
+                        file_chunks_blocks.append(current_chunk)
+                        current_chunk = []
+                        current_size = 0
+                    file_chunks_blocks.append([b])
+                    continue
+                if current_size + text_len > max_chars and current_chunk:
                     file_chunks_blocks.append(current_chunk)
-                    current_chunk = []
-                    current_size = 0
+                    current_chunk = [b]
+                    current_size = text_len
+                else:
+                    current_chunk.append(b)
+                    current_size += text_len
             if current_chunk:
                 file_chunks_blocks.append(current_chunk)
 
@@ -226,7 +242,15 @@ class ProcessorDirect:
             "input_ext": ".epub",
             "current_flat_idx": 0,
             "files": files_data,
-            "all_blocks": [{"text": b['simplified'], "formats": b['tag_mapping'], "line_idx": b['line_idx'], "indent": b['indent'], "trailing": b['trailing']} for b in all_blocks],
+            "all_blocks": [{
+                "text": b['text'],
+                "formats": b['tag_mapping'],
+                "start_line_idx": b['start_line_idx'],
+                "end_line_idx": b['end_line_idx'],
+                "orig_start_line_idx": b['start_line_idx'],
+                "orig_end_line_idx": b['end_line_idx'],
+                "file_rel_path": b.get('file_rel_path')
+            } for b in all_blocks],
             "finished": False,
             "block_to_file": block_to_file
         }
@@ -330,36 +354,66 @@ class ProcessorDirect:
             
         source_dir = os.path.join(self.get_cache_dir_path(input_path), "source")
         
-        orig_indices = chunk["block_indices"]
-        group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in orig_indices]
-        
-        trans_texts, ok = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks, auto_repair=False)
+        # 获取清洗后的整块翻译文本
+        trans_text = self.epub_anchor_processor.clean_markdown_code_blocks(chunk["trans"])
         
         for rel_path in affected_files:
             if not rel_path: continue
             abs_path = os.path.join(source_dir, rel_path)
             if not os.path.exists(abs_path): continue
             
-            with open(abs_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            for b_idx, text in zip(orig_indices, trans_texts):
+            # 获取该文件中属于此 chunk 的所有 block，按动态行号排序
+            file_blocks = []
+            for b_idx in chunk["block_indices"]:
                 if block_to_file.get(str(b_idx)) != rel_path:
                     continue
                 block_meta = cached_data["all_blocks"][b_idx]
-                line_idx = block_meta.get("line_idx")
-                tag_mapping = block_meta.get("formats", {})
-                indent = block_meta.get("indent", "")
-                trailing = block_meta.get("trailing", "\n")
-                
-                if line_idx is not None and 0 <= line_idx < len(lines):
-                    restored = self.epub_anchor_processor.restore_line(
-                        text, tag_mapping, indent, trailing
-                    )
-                    lines[line_idx] = restored
+                file_blocks.append((b_idx, block_meta))
+            
+            if not file_blocks: continue
+            
+            file_blocks.sort(key=lambda x: x[1]['start_line_idx'])
+            
+            first_line = file_blocks[0][1]['start_line_idx']
+            last_line = file_blocks[-1][1]['end_line_idx']
+            
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # 翻译文本转成行列表，确保每行以换行符结尾
+            trans_lines = trans_text.split('\n')
+            formatted_trans_lines = []
+            for tl in trans_lines:
+                if tl and not tl.endswith('\n'):
+                    tl += '\n'
+                elif tl == '':
+                    tl = '\n'
+                formatted_trans_lines.append(tl)
+            
+            if not formatted_trans_lines:
+                formatted_trans_lines = ['\n']
+            
+            # 整块替代：保留范围前的行 + 翻译行 + 范围后的行
+            new_lines = lines[:first_line]
+            new_lines.extend(formatted_trans_lines)
+            new_lines.extend(lines[last_line + 1:])
             
             with open(abs_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+                f.writelines(new_lines)
+            
+            # 更新后续 block 的动态行号
+            old_line_count = last_line - first_line + 1
+            new_line_count = len(formatted_trans_lines)
+            delta = new_line_count - old_line_count
+            
+            if delta != 0:
+                for b_info in cached_data["all_blocks"]:
+                    if b_info.get('file_rel_path') == rel_path:
+                        if b_info['start_line_idx'] > last_line:
+                            b_info['start_line_idx'] += delta
+                            b_info['end_line_idx'] += delta
+                        elif b_info['start_line_idx'] == last_line and b_info['end_line_idx'] > last_line:
+                            b_info['end_line_idx'] += delta
 
     def _collect_file_to_chunks(self, cached_data):
         block_to_file = cached_data.get("block_to_file", {})
@@ -382,32 +436,49 @@ class ProcessorDirect:
             with open(abs_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
             
+            # 收集所有替换操作，使用原始行号
             replacements = []
+            block_to_file = cached_data.get("block_to_file", {})
             
             for f_idx, chunk in chunks:
-                orig_indices = chunk["block_indices"]
-                group_blocks = [{"text": cached_data["all_blocks"][idx]["text"], "formats": cached_data["all_blocks"][idx]["formats"]} for idx in orig_indices]
-                trans_texts, _ = self.epub_anchor_processor.validate_and_parse_response(chunk["trans"], group_blocks)
+                trans_text = self.epub_anchor_processor.clean_markdown_code_blocks(chunk["trans"])
+                if not trans_text:
+                    continue
                 
-                block_to_file = cached_data.get("block_to_file", {})
-                for b_idx, text in zip(orig_indices, trans_texts):
+                orig_indices = chunk["block_indices"]
+                file_blocks = []
+                for b_idx in orig_indices:
                     if block_to_file.get(str(b_idx)) != rel_path:
                         continue
                     block_meta = cached_data["all_blocks"][b_idx]
-                    line_idx = block_meta.get("line_idx")
-                    tag_mapping = block_meta.get("formats", {})
-                    indent = block_meta.get("indent", "")
-                    trailing = block_meta.get("trailing", "\n")
-                    
-                    if line_idx is not None and 0 <= line_idx < len(lines):
-                        restored = self.epub_anchor_processor.restore_line(
-                            text, tag_mapping, indent, trailing
-                        )
-                        replacements.append((line_idx, restored))
+                    file_blocks.append(block_meta)
+                
+                if not file_blocks: continue
+                
+                # 使用原始行号定位
+                first_line = file_blocks[0]['orig_start_line_idx']
+                last_line = file_blocks[-1]['orig_end_line_idx']
+                
+                trans_lines = trans_text.split('\n')
+                formatted_trans_lines = []
+                for tl in trans_lines:
+                    if tl and not tl.endswith('\n'):
+                        tl += '\n'
+                    elif tl == '':
+                        tl = '\n'
+                    formatted_trans_lines.append(tl)
+                
+                if not formatted_trans_lines:
+                    formatted_trans_lines = ['\n']
+                
+                replacements.append((first_line, last_line, formatted_trans_lines))
+            
+            # 按起始行号降序排列，从后往前替换，避免前面的替换影响后面的行号
+            replacements.sort(key=lambda x: x[0], reverse=True)
             
             if mode == "replace":
-                for line_idx, restored in replacements:
-                    lines[line_idx] = restored
+                for first_line, last_line, trans_lines in replacements:
+                    lines = lines[:first_line] + trans_lines + lines[last_line + 1:]
             
             with open(abs_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
@@ -418,12 +489,15 @@ class ProcessorDirect:
             raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
         
         cache_dir = self.get_cache_dir_path(input_path)
-        source_dir = os.path.join(cache_dir, "source")
+        original_dir = os.path.join(cache_dir, "original")
         work_dir = os.path.join(cache_dir, "_tmp_translated")
+        
+        if not os.path.exists(original_dir):
+            raise ValueError("原始母版目录不存在，无法导出。")
         
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir)
-        shutil.copytree(source_dir, work_dir)
+        shutil.copytree(original_dir, work_dir)
         
         file_to_chunks = self._collect_file_to_chunks(cached_data)
         self._apply_translation_to_dir(work_dir, cached_data, file_to_chunks, mode="replace")

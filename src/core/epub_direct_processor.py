@@ -10,10 +10,10 @@ class EPubDirectProcessor:
     直接处理 HTML 文本，不进行标签简化和格式检查。
     原则：
     1. 不使用任何 HTML 解析库（无 BeautifulSoup / lxml / html.parser）。
-    2. 以"行"为最小提取单位。
+    2. 以"段落块"（完整的 <p></p> 等块级元素）为最小提取单位，<p></p> 不可中断。
     3. 不生成 `<t1>` 等简化标签，保持原样。
     4. 不使用 `<1>...</1>` 包装发送给 AI，而是直接拼接多行。
-    5. 返回的结果将直接覆盖当前块的第一行，其余行置空。
+    5. 返回的结果将直接整块替代原文对应区域，不再逐行 1:1 对齐。
     """
 
     # 匹配 HTML 注释、处理指令、DOCTYPE、所有标签 (包含属性)
@@ -160,7 +160,7 @@ class EPubDirectProcessor:
             shutil.rmtree(self.temp_dir)
 
     # ──────────────────────────────────────────────
-    #  核心：逐行提取
+    #  核心：段落块提取（<p></p> 等完整块级元素）
     # ──────────────────────────────────────────────
 
     @staticmethod
@@ -180,31 +180,106 @@ class EPubDirectProcessor:
             r'\u00c0-\u024f'    # Latin Extended
             r']', no_tags))
 
-    def extract_lines(self, html_string):
+    def extract_paragraph_blocks(self, html_string):
         """
-        从 HTML 字符串中提取所有含有可翻译文本的行。
+        从 HTML 字符串中提取完整的段落块（如 <p>...</p> 等块级元素）。
+        每个段落块在原文中占据一个连续的行范围，翻译时将整体替换。
         返回 list[dict]，每个 dict 包含:
-          - line_idx: 原始行号 (0-indexed)
-          - orig_line: 原始行内容（含换行符）
-          - simplified: 简化后的行内容（在直接模式下就是去掉首尾空格的原始HTML）
-          - tag_mapping: 空字典（不再需要）
-          - indent: 行首空白
-          - trailing: 行尾空白（含换行）
+          - start_line_idx: 起始行号 (0-indexed，包含)
+          - end_line_idx: 结束行号 (0-indexed，包含)
+          - text: 完整原文（含换行符）
+          - tag_mapping: 空字典（保留兼容）
         """
         lines = html_string.splitlines(keepends=True)
         blocks = []
-        for i, line in enumerate(lines):
+
+        # 块级标签（通常不会嵌套自身，或嵌套场景简单）
+        BLOCK_TAG_PATTERNS = [
+            r'p', r'h[1-6]', r'li', r'blockquote', r'figcaption',
+            r'dt', r'dd', r'summary', r'pre'
+        ]
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            matched = False
+
+            for tag_pattern in BLOCK_TAG_PATTERNS:
+                open_re = re.compile(rf'<({tag_pattern})(?:\s+[^>]*)?>', re.IGNORECASE)
+                open_match = open_re.search(line)
+                if not open_match:
+                    continue
+
+                tag_name = open_match.group(1).lower()
+                close_re = re.compile(rf'</{re.escape(tag_name)}\s*>', re.IGNORECASE)
+
+                # 同一行内已闭合
+                if close_re.search(line):
+                    if self.line_has_text(line):
+                        blocks.append({
+                            'start_line_idx': i,
+                            'end_line_idx': i,
+                            'text': line,
+                            'tag_mapping': {},
+                        })
+                    matched = True
+                    break
+
+                # 跨多行查找闭标签
+                block_lines = [line]
+                j = i + 1
+                found_close = False
+                while j < len(lines):
+                    block_lines.append(lines[j])
+                    if close_re.search(lines[j]):
+                        found_close = True
+                        break
+                    j += 1
+
+                if found_close:
+                    text = ''.join(block_lines)
+                    if self.line_has_text(text):
+                        blocks.append({
+                            'start_line_idx': i,
+                            'end_line_idx': j,
+                            'text': text,
+                            'tag_mapping': {},
+                        })
+                    i = j  # 跳到结束行
+                    matched = True
+                    break
+
+            if matched:
+                i += 1
+                continue
+
+            # 未被块级标签捕获，但含有文本的行（裸文本）
             if self.line_has_text(line):
-                simplified, tag_mapping, indent, trailing = self.extract_and_simplify(line)
                 blocks.append({
-                    'line_idx': i,
-                    'orig_line': line,
-                    'simplified': simplified,
-                    'tag_mapping': tag_mapping,
-                    'indent': indent,
-                    'trailing': trailing,
+                    'start_line_idx': i,
+                    'end_line_idx': i,
+                    'text': line,
+                    'tag_mapping': {},
                 })
-        return blocks
+
+            i += 1
+
+        # 去重/防嵌套：保留范围更小的内层块，丢弃外层重叠块
+        blocks.sort(key=lambda b: (b['start_line_idx'], b['end_line_idx']))
+        filtered = []
+        for b in blocks:
+            overlap = False
+            for existing in filtered:
+                if not (b['end_line_idx'] < existing['start_line_idx'] or
+                        b['start_line_idx'] > existing['end_line_idx']):
+                    # 有重叠，若 b 范围更大或相等，则丢弃 b
+                    if (b['end_line_idx'] - b['start_line_idx']) >= (existing['end_line_idx'] - existing['start_line_idx']):
+                        overlap = True
+                        break
+            if not overlap:
+                filtered.append(b)
+
+        return filtered
 
     # ──────────────────────────────────────────────
     #  核心：不再简化标签
@@ -213,25 +288,24 @@ class EPubDirectProcessor:
     def extract_and_simplify(self, line):
         """
         在直接模式中，我们不进行标签简化。
-        只提取缩进和尾部空白。
+        只提取缩进和尾部空白。（已弃用，保留兼容）
         """
         indent_m = re.match(r'^(\s*)', line)
         indent = indent_m.group(1) if indent_m else ""
         trailing_m = re.search(r'(\s*)$', line)
         trailing = trailing_m.group(1) if trailing_m else ""
         clean_text = line.strip()
-
         return clean_text, {}, indent, trailing
 
     # ──────────────────────────────────────────────
-    #  核心：还原 (回填)
+    #  核心：还原 (回填) —— 整块替换模式下不再使用
     # ──────────────────────────────────────────────
 
     def restore_line(self, translated_text, tag_mapping, indent, trailing):
         """
         在直接模式中，不进行任何标签替换。直接拼接缩进、翻译后的文本和尾部空白。
+        （整块替换模式下已弃用，保留兼容）
         """
-        # 如果 translated_text 是空的，就不要加 indent 和 trailing 了，避免多出空行
         if not translated_text:
             return ""
         return indent + translated_text + trailing
@@ -244,63 +318,51 @@ class EPubDirectProcessor:
         """将一组块格式化为 AI 提示格式（直接拼接，不加任何 <n> 标签）"""
         lines = []
         for block in group_blocks:
-            lines.append(block['simplified'])
+            lines.append(block.get('text', block.get('simplified', '')))
         return "\n".join(lines)
 
     def check_anchor_format(self, text, expected_count):
         """
-        在直接模式下，我们不需要进行任何格式检验。
+        在直接模式下，不需要进行严格的格式检验。
         """
         return "ok"
 
+    @staticmethod
+    def clean_markdown_code_blocks(response_text):
+        """过滤掉 markdown 代码块标记，返回纯文本。"""
+        lines = response_text.split('\n')
+        cleaned = []
+        in_code_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('```'):
+                in_code_block = not in_code_block
+                continue
+            cleaned.append(line)
+        return '\n'.join(cleaned).strip()
+
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """
-        在直接模式中，我们逐行提取文本，发送给 AI 的也是多行文本。
-        预期 AI 返回的行数与发送的行数一致。我们通过按行拆分来一对一回填。
-        如果行数不一致，我们会尽可能对齐。
+        整块替换模式：不再按行拆分对齐。
+        直接返回清洗后的整块翻译文本。
         """
-        expected_len = len(original_group)
-        if expected_len == 0:
-            return [], False
-            
-        # 拆分并去除纯空行（因为原文件中含有文本的行绝不会是空行）
-        # 如果模型输出了 markdown 代码块 ```html，我们也要过滤掉
-        lines = []
-        for line in response_text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('```'):
-                continue
-            lines.append(line)
-            
-        translated_texts = lines[:expected_len]
-        
-        # 如果模型返回的行数较少，缺少的部分只能留空或保留原文
-        while len(translated_texts) < expected_len:
-            translated_texts.append(original_group[len(translated_texts)]['text'])
-            
-        # 如果模型返回的行数过多，将多余的行追加到最后一行
-        if len(lines) > expected_len:
-            extra = " ".join(lines[expected_len:])
-            translated_texts[-1] += " " + extra
-            
-        # 在直接模式下，我们总是视作成功 (True)，不阻断流程
-        return translated_texts, True
+        cleaned = self.clean_markdown_code_blocks(response_text)
+        return [cleaned], True
 
     # ──────────────────────────────────────────────
     #  便捷兼容接口
     # ──────────────────────────────────────────────
 
-    def create_blocks_from_html(self, html_string, start_global_idx=0):
+    def create_blocks_from_html(self, html_string, start_global_idx=0, file_rel_path=None):
         """
-        从 HTML 文件内容提取所有含文本行，返回 block 列表。
-        每个 block 包含 line_idx, orig_line, simplified, tag_mapping, indent, trailing, global_idx。
+        从 HTML 文件内容提取所有段落块，返回 block 列表。
+        每个 block 包含 start_line_idx, end_line_idx, text, tag_mapping, global_idx, file_rel_path。
         """
-        blocks = self.extract_lines(html_string)
+        blocks = self.extract_paragraph_blocks(html_string)
         for i, b in enumerate(blocks):
             b['global_idx'] = start_global_idx + i
-            # 为兼容旧接口保留 text 字段
-            b['text'] = b['simplified']
+            # 为兼容旧接口保留字段
+            b['text'] = b['text']
             b['formats'] = b['tag_mapping']
+            b['file_rel_path'] = file_rel_path
         return blocks
