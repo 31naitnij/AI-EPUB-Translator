@@ -504,20 +504,20 @@ class Processor:
 
     def finalize_epub_anchor_translation(self, input_path, output_path):
         """
-        导出纯译文版：从 original/ 复制干净副本，回填翻译后打包。
+        导出纯译文版：从 source/ 复制工作副本，回填翻译后打包。
         """
         cached_data = self.load_cache(input_path)
         if not cached_data:
             raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
         
         cache_dir = self.get_cache_dir_path(input_path)
-        original_dir = os.path.join(cache_dir, "original")
+        source_dir = os.path.join(cache_dir, "source")
         work_dir = os.path.join(cache_dir, "_tmp_translated")
         
-        # 从 original 复制干净副本
+        # 从 source/ 复制工作副本（line_idx 基于 source/ 的行号）
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir)
-        shutil.copytree(original_dir, work_dir)
+        shutil.copytree(source_dir, work_dir)
         
         file_to_chunks = self._collect_file_to_chunks(cached_data)
         self._apply_translation_to_dir(work_dir, cached_data, file_to_chunks, mode="replace")

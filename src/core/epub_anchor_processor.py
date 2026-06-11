@@ -106,12 +106,18 @@ class EPubAnchorProcessor:
                 
                 res = content
                 
-                # 步骤 1: 在块级开标签前插入换行
-                res = pattern_open.sub(r'\n\g<1>', res)
-                # 步骤 2: 在块级闭标签后插入换行
-                res = pattern_close.sub(r'\g<1>\n', res)
-                # 步骤 3: 在自闭合标签后插入换行
-                res = pattern_self.sub(r'\g<1>\n', res)
+                # 步骤 1: 在块级开标签前插入换行（幂等：前一位已是换行则不再插入）
+                def newline_before(m):
+                    return m.group(1) if m.start() > 0 and m.string[m.start()-1] == '\n' else '\n' + m.group(1)
+                res = pattern_open.sub(newline_before, res)
+                
+                # 步骤 2: 在块级闭标签后插入换行（幂等：后一位已是换行则不再插入）
+                def newline_after(m):
+                    return m.group(1) if m.end() < len(m.string) and m.string[m.end()] == '\n' else m.group(1) + '\n'
+                res = pattern_close.sub(newline_after, res)
+                
+                # 步骤 3: 在自闭合标签后插入换行（幂等：后一位已是换行则不再插入）
+                res = pattern_self.sub(newline_after, res)
                 
                 # 步骤 4: 规范化连续空行 — 最多保留一个空行（两个换行符）
                 # 先将 3 个及以上连续换行（含中间空白）压缩为两个换行

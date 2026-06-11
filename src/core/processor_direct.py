@@ -418,12 +418,12 @@ class ProcessorDirect:
             raise ValueError("无法加载翻译缓存，请确保已开始翻译。")
         
         cache_dir = self.get_cache_dir_path(input_path)
-        original_dir = os.path.join(cache_dir, "original")
+        source_dir = os.path.join(cache_dir, "source")
         work_dir = os.path.join(cache_dir, "_tmp_translated")
         
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir)
-        shutil.copytree(original_dir, work_dir)
+        shutil.copytree(source_dir, work_dir)
         
         file_to_chunks = self._collect_file_to_chunks(cached_data)
         self._apply_translation_to_dir(work_dir, cached_data, file_to_chunks, mode="replace")
