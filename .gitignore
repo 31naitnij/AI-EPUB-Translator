@@ -1,0 +1,69 @@
+# --- 敏感信息与本地配置 ---
+config.json
+*.json_cache
+.env
+
+# --- Python 临时文件 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+
+# --- 构建与打包产物 ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# --- 运行时缓存与输出 ---
+cache/
+output/
+test_cache/
+test_output/
+temp_cache/
+test_source/
+_*/
+check_xml/
+
+# --- 临时脚本 ---
+test_*.py
+verify_*.py
+reproduce_*.py
+simulate_*.py
+debug_*.py
+check_*.py
+make_test_*.py
+create_test_*.py
+inspect_*.py
+analyze_*.py
+
+# --- 临时文件 ---
+*.epub
+final_output.docx
+inter.html
+out_styled.docx
+ref.docx
+test_table_gen.docx
+
+# --- IDE 与编辑器 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- 操作系统 ---
+.DS_Store
+Thumbs.db
+desktop.ini
