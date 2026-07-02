@@ -1,5 +1,105 @@
 from openai import OpenAI
 import json
+import re
+import time
+import threading
+
+
+class RateLimiter:
+    def __init__(self, interval=0, batch_size=1):
+        self.interval = float(interval)
+        self.batch_size = int(batch_size)
+        self.lock = threading.Lock()
+        self.window_start = 0.0
+        self.tokens_used = 0
+
+    def set_params(self, interval, batch_size=1):
+        with self.lock:
+            self.interval = float(interval)
+            self.batch_size = int(batch_size)
+
+    def acquire(self):
+        if self.interval <= 0 or self.batch_size <= 0:
+            return
+        while True:
+            wait_until = 0.0
+            with self.lock:
+                now = time.monotonic()
+                if self.window_start == 0.0:
+                    self.window_start = now
+                if now >= self.window_start + self.interval:
+                    self.window_start = now
+                    self.tokens_used = 0
+                if self.tokens_used < self.batch_size:
+                    self.tokens_used += 1
+                    return
+                wait_until = self.window_start + self.interval
+            wait_time = wait_until - time.monotonic()
+            if wait_time > 0:
+                time.sleep(wait_time)
+
+
+THINK_TAGS = ['thought', 'think', 'thinking', 'reasoning', 'cot', 'scratchpad', 'reflection', 'analysis']
+
+
+def _remove_closed_tags(text):
+    tag_pattern = '|'.join(THINK_TAGS)
+    open_re = re.compile(rf'<({tag_pattern})\b[^>]*>', re.IGNORECASE)
+    prev = None
+    while prev != text:
+        prev = text
+        result = []
+        i = 0
+        while i < len(text):
+            m = open_re.search(text, i)
+            if not m:
+                result.append(text[i:])
+                break
+            result.append(text[i:m.start()])
+            tag_name = m.group(1).lower()
+            close_re = re.compile(rf'</{tag_name}>', re.IGNORECASE)
+            close_m = close_re.search(text, m.end())
+            if close_m:
+                i = close_m.end()
+            else:
+                result.append(text[m.start():])
+                break
+        text = ''.join(result)
+    return text
+
+
+def _find_first_unclosed_tag(text):
+    tag_pattern = '|'.join(THINK_TAGS)
+    open_re = re.compile(rf'<({tag_pattern})\b[^>]*>', re.IGNORECASE)
+    lower_text = text.lower()
+    first_pos = len(text)
+    pos = 0
+    while pos < len(text):
+        m = open_re.search(text, pos)
+        if not m:
+            break
+        tag_name = m.group(1).lower()
+        close_tag_lower = f'</{tag_name}>'
+        close_start = lower_text.find(close_tag_lower, m.end())
+        if close_start == -1:
+            if m.start() < first_pos:
+                first_pos = m.start()
+            break
+        pos = close_start + len(close_tag_lower)
+    return first_pos
+
+
+def strip_thinking_tags(text, stream_mode=False):
+    if not text:
+        return text
+    cleaned = _remove_closed_tags(text)
+    if stream_mode:
+        cut_pos = _find_first_unclosed_tag(cleaned)
+        cleaned = cleaned[:cut_pos]
+    cleaned = re.sub(r'[ \t]*\n[ \t]*\n[ \t]*\n+', '\n\n', cleaned)
+    cleaned = re.sub(r'^(\s*\n)+', '', cleaned)
+    cleaned = re.sub(r'(\s*\n)+$', '', cleaned)
+    return cleaned
 
 
 class Translator:
@@ -30,7 +130,6 @@ class Translator:
                 )
                 full_content = ""
                 for chunk in response:
-                    # 流式 chunk 也做类型保护: 异常网关可能返回字符串
                     if isinstance(chunk, str):
                         raise APIResponseError(
                             "流式响应返回了字符串而非标准 SSE chunk",
@@ -43,8 +142,10 @@ class Translator:
                     delta = chunk.choices[0].delta.content if chunk.choices else ""
                     if delta:
                         full_content += delta
-                        stream_callback(full_content)
-                return full_content
+                        cleaned = strip_thinking_tags(full_content, stream_mode=True)
+                        if cleaned:
+                            stream_callback(cleaned)
+                return strip_thinking_tags(full_content)
             else:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -54,7 +155,8 @@ class Translator:
                     stop=["⏹️"],
                     extra_body=extra_body
                 )
-                return self._extract_content(response)
+                content = self._extract_content(response)
+                return strip_thinking_tags(content)
 
         try:
             # Mode 0: Doubao-style nested object

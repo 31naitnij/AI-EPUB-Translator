@@ -636,25 +636,28 @@ class MainWindow(QMainWindow):
                     self.flat_chunks.append((f_i, c_i))
                     
                     self.group_table.insertRow(row)
-                    # ID
                     self.group_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-                    # Status
-                    status_str = "已翻译" if c_data.get("trans") else "未翻译"
+                    
+                    is_err = c_data.get("is_error", False)
+                    err_type = c_data.get("error_type", "")
+                    if is_err and err_type == "api_error":
+                        status_str = "API错误"
+                    elif is_err:
+                        status_str = "格式错误"
+                    elif c_data.get("trans"):
+                        status_str = "已翻译"
+                    else:
+                        status_str = "未翻译"
                     status_item = QTableWidgetItem(status_str)
                     self.group_table.setItem(row, 1, status_item)
                     
-                    # Preview
                     preview = c_data.get("orig", "")[:50].replace("\n", " ") + "..."
                     preview_item = QTableWidgetItem(preview)
                     self.group_table.setItem(row, 2, preview_item)
                     
-                    # ID
-                    id_item = QTableWidgetItem(str(row + 1))
-                    self.group_table.setItem(row, 0, id_item)
-                    
-                    if c_data.get("is_error", False):
+                    if is_err:
                          for col in range(3):
-                             self.group_table.item(row, col).setBackground(QColor("#ffaaaa")) # Unify to Red
+                             self.group_table.item(row, col).setBackground(QColor("#ffaaaa"))
                     
                     row += 1
             
@@ -954,7 +957,12 @@ class MainWindow(QMainWindow):
                 self.group_table.blockSignals(True)
                 status_item = self.group_table.item(current_idx, 1)
                 if status_item:
-                     status_item.setText("已翻译" if not chunk["is_error"] else "格式错误")
+                    if error_type == "api_error":
+                        status_item.setText("API错误")
+                    elif error_type != "ok":
+                        status_item.setText("格式错误")
+                    else:
+                        status_item.setText("已翻译")
                 
                 bg_color = QColor("#ffaaaa") if chunk["is_error"] else QColor("#ffffff")
                 for col in range(3):

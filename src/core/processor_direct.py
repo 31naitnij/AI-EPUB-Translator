@@ -5,6 +5,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from src.core.epub_direct_processor import EPubDirectProcessor
+from src.core.translator import RateLimiter
 
 class ProcessorDirect:
     def __init__(self, cache_dir):
@@ -64,9 +65,14 @@ class ProcessorDirect:
                 trans_text = chunk.get("trans", "")
                 if not trans_text:
                     chunk["is_error"] = False
+                    chunk.pop("error_type", None)
+                    continue
+                
+                if chunk.get("error_type") == "api_error" or trans_text.startswith("[API错误]"):
+                    chunk["is_error"] = True
+                    chunk["error_type"] = "api_error"
                     continue
                     
-                # 实时检查格式
                 error_type = self.check_chunk_format(input_path, trans_text, expected_count=len(chunk.get("block_indices", [])))
                 chunk["is_error"] = (error_type != "ok")
                 chunk["error_type"] = error_type
@@ -269,44 +275,67 @@ class ProcessorDirect:
         loop_range = sorted(target_indices) if target_indices is not None else range(cached_data["current_flat_idx"], len(flat_list))
 
         self.status = "running"
+        rate_limiter = RateLimiter(interval=interval, batch_size=max_workers)
 
         def process_chunk_task(i):
             if self.status != "running":
                 return
 
-            # 在 sleep 之前发送进度回调，让 UI 知道翻译正在启动
             if callback:
                 try:
                     callback(i, len(flat_list), "", "", False, "starting")
                 except Exception:
                     pass
 
-            if interval > 0:
-                time.sleep(interval)
-
             f_idx, c_idx = flat_list[i]
             
             with self.lock:
                 chunk = cached_data["files"][f_idx]["chunks"][c_idx]
             
-            full_translation = translator.translate_chunk(
-                chunk["orig"], 
-                stream_callback=None
-            )
+            rate_limiter.acquire()
+            
+            try:
+                full_translation = translator.translate_chunk(
+                    chunk["orig"], 
+                    stream_callback=None
+                )
+                api_error = None
+            except Exception as e:
+                full_translation = ""
+                api_error = str(e)
             
             with self.lock:
+                if api_error:
+                    chunk["trans"] = f"[API错误] {api_error}"
+                    chunk["is_error"] = True
+                    chunk["error_type"] = "api_error"
+                    self.save_chunk(input_path, i, chunk)
+                    if target_indices is None:
+                        if i >= cached_data["current_flat_idx"]:
+                             cached_data["current_flat_idx"] = i + 1
+                    self.save_metadata(input_path, cached_data)
+                    if callback:
+                        callback(i, len(flat_list), chunk["orig"], chunk["trans"], True, "api_error")
+                    return
+
                 chunk["trans"] = full_translation
                 
                 expected_count = len(chunk["block_indices"])
                 error_type = self.check_chunk_format(input_path, full_translation, expected_count=expected_count)
                 chunk["error_type"] = error_type
                 
-                chunk["is_error"] = False 
-                self.apply_chunk_to_mirror(input_path, cached_data, i)
+                if error_type == "ok":
+                    chunk["is_error"] = False
+                    self.apply_chunk_to_mirror(input_path, cached_data, i)
+                elif error_type.startswith("unbalanced_internal_"):
+                    chunk["is_error"] = True
+                    self.apply_chunk_to_mirror(input_path, cached_data, i)
+                else:
+                    chunk["is_error"] = True
                 
                 self.save_chunk(input_path, i, chunk)
                 
-                if target_indices is None: 
+                if target_indices is None:
                     if i >= cached_data["current_flat_idx"]:
                          cached_data["current_flat_idx"] = i + 1
                 self.save_metadata(input_path, cached_data)
@@ -450,7 +479,7 @@ class ProcessorDirect:
         flat_idx = 0
         for f_data in cached_data["files"]:
             for chunk in f_data["chunks"]:
-                if chunk.get("trans"):
+                if chunk.get("trans") and chunk.get("error_type") != "api_error":
                     rel_path = block_to_file.get(str(chunk["block_indices"][0]))
                     if rel_path not in file_to_chunks: file_to_chunks[rel_path] = []
                     file_to_chunks[rel_path].append((flat_idx, chunk))
