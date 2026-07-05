@@ -71,12 +71,18 @@ class EPubDirectProcessor:
         xhtml_files = self.get_xhtml_files()
         if not xhtml_files:
             return
-            
+
+        # 格式优化仅针对 HTML/XHTML 块级元素; .ncx 目录文件结构不同,
+        # 跳过格式化, 但仍由 get_xhtml_files() 返回供提取和翻译使用
+        xhtml_files = [f for f in xhtml_files if not f.lower().endswith('.ncx')]
+        if not xhtml_files:
+            return
+
         import re
         # 块级标签列表
-        BLOCK_TAGS = ['p', 'div', 'h[1-6]', 'ul', 'ol', 'li', 'blockquote', 
+        BLOCK_TAGS = ['p', 'div', 'h[1-6]', 'ul', 'ol', 'li', 'blockquote',
                       'table', 'tr', 'td', 'th', 'thead', 'tbody', 'tfoot',
-                      'figure', 'figcaption', 'header', 'footer', 
+                      'figure', 'figcaption', 'header', 'footer',
                       'article', 'section', 'aside', 'nav', 'main',
                       'pre', 'details', 'summary', 'dl', 'dt', 'dd']
         SELF_CLOSING = ['br', 'hr']
