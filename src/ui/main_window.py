@@ -627,6 +627,8 @@ class MainWindow(QMainWindow):
                 return False
 
             self.flat_chunks = []
+            # 重置编辑器索引记忆，避免旧的 current_indices 指向失效位置
+            self.current_indices = None
             self.group_table.setRowCount(0)
             self.group_table.blockSignals(True)
             
@@ -739,39 +741,54 @@ class MainWindow(QMainWindow):
             
     def update_block_table(self, group_idx):
         if not hasattr(self, 'flat_chunks') or not self.current_cache_data: return
-        
+
+        if group_idx < 0 or group_idx >= len(self.flat_chunks): return
         f_idx, g_idx = self.flat_chunks[group_idx]
-        group = self.current_cache_data["files"][f_idx]["chunks"][g_idx]
+        if f_idx >= len(self.current_cache_data["files"]): return
+        files_entry = self.current_cache_data["files"][f_idx]
+        if g_idx >= len(files_entry["chunks"]): return
+        group = files_entry["chunks"][g_idx]
         block_indices = group.get("block_indices", [])
-        
+
+        all_blocks = self.current_cache_data.get("all_blocks", [])
+
         self.block_table.setRowCount(0)
         self.block_table.blockSignals(True)
         for i, b_idx in enumerate(block_indices):
             self.block_table.insertRow(i)
             self.block_table.setItem(i, 0, QTableWidgetItem(str(b_idx + 1)))
-            
-            block_meta = self.current_cache_data["all_blocks"][b_idx]
-            preview = block_meta["text"][:100].replace("\n", " ")
+
+            if b_idx < 0 or b_idx >= len(all_blocks):
+                self.block_table.setItem(i, 1, QTableWidgetItem("(无效的块索引)"))
+                continue
+            block_meta = all_blocks[b_idx]
+            preview = block_meta.get("text", "")[:100].replace("\n", " ")
             self.block_table.setItem(i, 1, QTableWidgetItem(preview))
         self.block_table.blockSignals(False)
 
     def load_group_into_editor(self, flat_idx):
         if not hasattr(self, 'flat_chunks') or not self.flat_chunks: return
-        
+
+        if flat_idx < 0 or flat_idx >= len(self.flat_chunks): return
         ch_idx, ck_idx = self.flat_chunks[flat_idx]
-        
-        # 1. Before loading new, SYNC current editor content back to memory 
+
+        # 1. Before loading new, SYNC current editor content back to memory
         # BUT ONLY if we're switching to a DIFFERENT chunk (避免覆盖 on_progress 刚更新的翻译)
-        if hasattr(self, 'current_indices') and self.current_cache_data:
+        if hasattr(self, 'current_indices') and self.current_indices and self.current_cache_data:
              old_f_idx, old_c_idx = self.current_indices
              # 只有在切换到不同块时才回写，避免覆盖最新翻译
              if (old_f_idx, old_c_idx) != (ch_idx, ck_idx):
-                 self.current_cache_data["files"][old_f_idx]["chunks"][old_c_idx]["trans"] = self.trans_text_edit.toPlainText()
-        
+                 # 边界检查：旧索引可能因重新分块而失效
+                 if (0 <= old_f_idx < len(self.current_cache_data["files"]) and
+                     0 <= old_c_idx < len(self.current_cache_data["files"][old_f_idx]["chunks"])):
+                     self.current_cache_data["files"][old_f_idx]["chunks"][old_c_idx]["trans"] = self.trans_text_edit.toPlainText()
+
         cache_data = self.current_cache_data
-        
+
         if cache_data and ch_idx < len(cache_data["files"]):
-            chunk = cache_data["files"][ch_idx]["chunks"][ck_idx]
+            files_entry = cache_data["files"][ch_idx]
+            if ck_idx >= len(files_entry["chunks"]): return
+            chunk = files_entry["chunks"][ck_idx]
             
             # 视觉上保留 <n> 标记，并应用绿色高亮
             self.orig_text_edit.setPlainText(chunk.get("orig", ""))

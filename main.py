@@ -13,7 +13,8 @@ def global_excepthook(exc_type, exc_value, exc_tb):
     print(f"[GLOBAL EXCEPTION] {exc_type.__name__}: {exc_value}")
     traceback.print_exception(exc_type, exc_value, exc_tb)
     try:
-        QMessageBox.critical(None, "未捕获的异常", f"{exc_type.__name__}: {exc_value}\n\n{traceback.format_exc()}")
+        tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        QMessageBox.critical(None, "未捕获的异常", f"{exc_type.__name__}: {exc_value}\n\n{tb_str}")
     except Exception:
         pass
 

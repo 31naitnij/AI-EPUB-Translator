@@ -277,6 +277,11 @@ class ProcessorDirect:
         self.status = "running"
         rate_limiter = RateLimiter(interval=interval, batch_size=max_workers)
 
+        # 线程安全的任务函数
+        # 优化：缩小锁范围，将格式检查与单块持久化移到锁外，
+        # metadata 降频写入，避免后处理串行化导致并发退化。
+        meta_counter = [0]
+
         def process_chunk_task(i):
             if self.status != "running":
                 return
@@ -288,59 +293,56 @@ class ProcessorDirect:
                     pass
 
             f_idx, c_idx = flat_list[i]
-            
+
             with self.lock:
                 chunk = cached_data["files"][f_idx]["chunks"][c_idx]
-            
+                orig_text = chunk.get("orig", "")
+                block_indices = list(chunk.get("block_indices", []))
+
             rate_limiter.acquire()
-            
+
             try:
                 full_translation = translator.translate_chunk(
-                    chunk["orig"], 
+                    orig_text,
                     stream_callback=None
                 )
                 api_error = None
             except Exception as e:
                 full_translation = ""
                 api_error = str(e)
-            
-            with self.lock:
-                if api_error:
-                    chunk["trans"] = f"[API错误] {api_error}"
-                    chunk["is_error"] = True
-                    chunk["error_type"] = "api_error"
-                    self.save_chunk(input_path, i, chunk)
-                    if target_indices is None:
-                        if i >= cached_data["current_flat_idx"]:
-                             cached_data["current_flat_idx"] = i + 1
-                    self.save_metadata(input_path, cached_data)
-                    if callback:
-                        callback(i, len(flat_list), chunk["orig"], chunk["trans"], True, "api_error")
-                    return
 
-                chunk["trans"] = full_translation
-                
-                expected_count = len(chunk["block_indices"])
+            # === 锁外：纯计算（格式检查）===
+            if api_error:
+                error_type = "api_error"
+                trans_text = f"[API错误] {api_error}"
+            else:
+                expected_count = len(block_indices)
                 error_type = self.check_chunk_format(input_path, full_translation, expected_count=expected_count)
+                trans_text = full_translation
+
+            # === 锁内：更新内存 + 文件回填（文件冲突需串行）===
+            with self.lock:
+                chunk["trans"] = trans_text
                 chunk["error_type"] = error_type
-                
-                if error_type == "ok":
-                    chunk["is_error"] = False
+                chunk["is_error"] = (error_type != "ok")
+
+                if error_type == "ok" or error_type.startswith("unbalanced_internal_"):
                     self.apply_chunk_to_mirror(input_path, cached_data, i)
-                elif error_type.startswith("unbalanced_internal_"):
-                    chunk["is_error"] = True
-                    self.apply_chunk_to_mirror(input_path, cached_data, i)
-                else:
-                    chunk["is_error"] = True
-                
-                self.save_chunk(input_path, i, chunk)
-                
+
                 if target_indices is None:
                     if i >= cached_data["current_flat_idx"]:
                          cached_data["current_flat_idx"] = i + 1
-                self.save_metadata(input_path, cached_data)
 
-            if callback: callback(i, len(flat_list), chunk["orig"], full_translation, True, error_type)
+                # metadata 降频：每 max_workers 个 chunk 写一次，避免锁持有过久
+                meta_counter[0] += 1
+                should_save_meta = (meta_counter[0] % max(1, max_workers) == 0)
+                if should_save_meta:
+                    self.save_metadata(input_path, cached_data)
+
+            # === 锁外：单块持久化（写不同文件，无竞争）===
+            self.save_chunk(input_path, i, chunk)
+
+            if callback: callback(i, len(flat_list), orig_text, trans_text, True, error_type)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(process_chunk_task, i) for i in loop_range]
