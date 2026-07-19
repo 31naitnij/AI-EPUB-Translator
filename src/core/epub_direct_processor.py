@@ -436,10 +436,24 @@ class EPubDirectProcessor:
     # ──────────────────────────────────────────────
 
     def format_for_ai(self, group_blocks):
-        """将一组块格式化为 AI 提示格式（直接拼接，不加任何 <n> 标签）"""
+        """
+        将一组块格式化为 AI 提示格式（直接拼接，不加任何 <n> 标签）。
+
+        重要：每个 block 的 text 末尾通常带 \\n（来自 splitlines(keepends=True)），
+        若直接用 "\\n".join 拼接，块之间会出现空行（\\n\\n），导致：
+          1) AI 返回的译文也带这些空行；
+          2) apply_chunk_to_mirror 按"原文行数"分配译文行时空行被当作译文，
+             造成 .ncx 等严格结构文件错位、插入空行。
+        因此这里先 rstrip 每个 block 的尾部换行，再用单个 \\n 连接，
+        使译文行数严格等于 sum(block_orig_line_count)。
+        """
         lines = []
         for block in group_blocks:
-            lines.append(block.get('text', block.get('simplified', '')))
+            text = block.get('text', block.get('simplified', ''))
+            # 统一去掉尾部换行，保证拼接后行数与原文行数一致
+            if isinstance(text, str):
+                text = text.rstrip('\r\n')
+            lines.append(text)
         return "\n".join(lines)
 
     def check_anchor_format(self, text, expected_count):
@@ -450,7 +464,11 @@ class EPubDirectProcessor:
 
     @staticmethod
     def clean_markdown_code_blocks(response_text):
-        """过滤掉 markdown 代码块标记，返回纯文本。"""
+        """
+        过滤掉 markdown 代码块标记，返回纯文本。
+        注意：只 strip 首尾的换行符（\\n / \\r），保留行首缩进，
+        否则会破坏 .ncx / XHTML 等需要保留缩进的结构。
+        """
         lines = response_text.split('\n')
         cleaned = []
         in_code_block = False
@@ -460,7 +478,8 @@ class EPubDirectProcessor:
                 in_code_block = not in_code_block
                 continue
             cleaned.append(line)
-        return '\n'.join(cleaned).strip()
+        # 只去掉首尾的换行符，保留行首空格（缩进）
+        return '\n'.join(cleaned).strip('\r\n')
 
     def validate_and_parse_response(self, response_text, original_group, auto_repair=False):
         """

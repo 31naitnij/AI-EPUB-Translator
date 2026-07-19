@@ -396,6 +396,8 @@ class ProcessorDirect:
 
         # 获取清洗后的整块翻译文本
         trans_text = self.epub_anchor_processor.clean_markdown_code_blocks(chunk["trans"])
+        # 去掉 AI 可能附加的尾部换行/空行，避免被当作译文行插入文件
+        trans_text = trans_text.rstrip('\r\n')
 
         for rel_path in affected_files:
             if not rel_path: continue
@@ -417,7 +419,7 @@ class ProcessorDirect:
             with open(abs_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            # 把译文按行拆分
+            # 把译文按行拆分；末尾的空字符串已被 rstrip 去掉，行数应等于原文行数
             trans_lines_raw = trans_text.split('\n')
             trans_lines = []
             for tl in trans_lines_raw:
@@ -505,6 +507,8 @@ class ProcessorDirect:
                 trans_text = self.epub_anchor_processor.clean_markdown_code_blocks(chunk["trans"])
                 if not trans_text:
                     continue
+                # 去掉 AI 可能附加的尾部换行/空行，避免被当作译文行插入文件
+                trans_text = trans_text.rstrip('\r\n')
 
                 orig_indices = chunk["block_indices"]
                 file_blocks = []
@@ -519,7 +523,7 @@ class ProcessorDirect:
                 # 按原始行号排序
                 file_blocks.sort(key=lambda x: x['orig_start_line_idx'])
 
-                # 把译文按行拆分
+                # 把译文按行拆分；末尾的空字符串已被 rstrip 去掉
                 trans_lines_raw = trans_text.split('\n')
                 trans_lines = []
                 for tl in trans_lines_raw:
